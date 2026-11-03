@@ -205,10 +205,11 @@ class PilCanvas:
     def create_text(self, x, y, text="", font=None, fill="#fff", anchor="center", **_):
         self.ops.append(("text", (x, y), text, font, fill, anchor))
 
-    def rasterize(self, width, height, bg, scale, border=None, content=True, offset=(1, 1)):
+    def rasterize(self, width, height, bg, scale, border=None, content=True, offset=(1, 1), frame=(1, 1)):
         """
-        RGB picture, `scale` times the panel size (width x height, which includes the 1px frame): background colour,
+        RGB picture, `scale` times the panel size (width x height, which includes the frame): background colour,
         then the recorded drawing (shifted by `offset` - the frame), then the frame in `border` if given.
+        `frame` = (vertical edge thickness, horizontal edge thickness) in px; 0 leaves that pair of edges out.
         """
         S = scale
         im = Image.new("RGB", (width * S, height * S), bg)
@@ -231,7 +232,13 @@ class PilCanvas:
                     d.text(((x + ox) * S, (y + oy) * S), text, font=pf, fill=fill,
                            anchor=self._ANCHOR.get(anchor, "la"))
         if border:
-            d.rectangle([0, 0, width * S - 1, height * S - 1], outline=border, width=S)
+            fx, fy = frame
+            if fy:      # horizontal edges: top and bottom
+                d.rectangle([0, 0, width * S - 1, fy * S - 1], fill=border)
+                d.rectangle([0, (height - fy) * S, width * S - 1, height * S - 1], fill=border)
+            if fx:      # vertical edges: left and right
+                d.rectangle([0, 0, fx * S - 1, height * S - 1], fill=border)
+                d.rectangle([(width - fx) * S, 0, width * S - 1, height * S - 1], fill=border)
         return im
 
 

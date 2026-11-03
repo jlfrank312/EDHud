@@ -16,6 +16,7 @@ from tkinter import font as tkfont
 
 import edhud_cargo
 import edhud_curve
+from edhud_edhm import scale_luminosity
 
 log = logging.getLogger("EDMarketConnector.EDHud.overlay")
 
@@ -31,9 +32,11 @@ COLORS = {
     "dest": "#ff4d4d",    # destination system/station of away-from-home missions (couriers)
     "pay": "#4cff8f",     # mission payout column (own style so it can follow the EDHM theme separately from "good")
     "bg": "#090c11",      # window background
-    "border": "#7a4a10",  # window border / divider lines
+    "border": "#7a4a10",  # window border (the frame around the panel)
+    "rule": "#7a4a10",    # divider lines and bar outlines inside the panel (follows "border" unless edhud_theme.json sets it)
 }
 BASE_COLORS = dict(COLORS)   # the colours EDHud starts with (built-ins + edhud_theme.json): what "match theme" OFF restores
+_luminosity = 100          # percent; scales every foreground colour (see apply_palette / lum)
 _palette_version = 0         # bumped by apply_palette so open windows redraw even when their text did not change
 BORDER_UNLOCKED = "#00d0ff"
 PAD = 9
@@ -74,6 +77,8 @@ def load_theme(path):
         if key in COLORS and isinstance(val, str) and len(val) == 7 and val.startswith("#"):
             COLORS[key] = val
             n += 1
+    if "rule" not in data:
+        COLORS["rule"] = COLORS["border"]        # dividers keep matching the border unless the file says otherwise
     return n
 
 
@@ -83,15 +88,21 @@ def snapshot_base():
     BASE_COLORS.update(COLORS)
 
 
-def apply_palette(palette):
+def lum(color):
+    """`color` at the current luminosity setting (for colours that are not in COLORS, e.g. cargo-bar fills)."""
+    return scale_luminosity(color, _luminosity)
+
+
+def apply_palette(palette, luminosity=100):
     """
-    Switch COLORS to `palette` in place (any subset of keys). `bg` is never changed: it is the text window's
-    transparent colour key. Windows pick the new colours up on their next redraw.
+    Switch COLORS to `palette` (any subset of keys) scaled to `luminosity` percent. `bg` is never changed or scaled:
+    it is the text window's transparent colour key. Windows pick the new colours up on their next redraw.
     """
-    global _palette_version
+    global _palette_version, _luminosity
+    _luminosity = int(luminosity)
     for key, val in palette.items():
         if key in COLORS and key != "bg" and isinstance(val, str) and len(val) == 7 and val.startswith("#"):
-            COLORS[key] = val
+            COLORS[key] = scale_luminosity(val, _luminosity)
     _palette_version += 1
 
 
@@ -125,7 +136,7 @@ class OverlayWindow:
     """
 
     def __init__(self, master, panel_id, x, y, on_moved=None, font_family=None, font_size=11,
-                 opacity=0.85, text_opacity=1.0, locked=True, dual=None, curve=None):
+                 opacity=0.85, text_opacity=1.0, locked=True, dual=None, curve=None, frame=(1, 1)):
         self.master = master
         self.panel_id = panel_id
         self.x, self.y = int(x), int(y)
@@ -138,11 +149,12 @@ class OverlayWindow:
         self.dual = (sys.platform == "win32") if dual is None else bool(dual)
         # cockpit-curvature effect (edhud_curve): CurveParams or None = flat panel
         self.curve = curve
+        self._frame = (max(0, int(frame[0])), max(0, int(frame[1])))   # (vertical edge px, horizontal edge px); 0 = off
         self._curved = False            # what is on screen right now
         self._curve_failed = False      # latched if the effect ever errors: stay flat rather than retry every tick
         self._photos = []               # Tk keeps no reference to PhotoImages
         self._origin = (0, 0)           # window top-left relative to (x, y); non-zero when the warped panel overhangs
-        self._twin_inset = 1            # text window offset inside the background window (1px frame when flat)
+        self._twin_inset = (1, 1)       # text window offset inside the background window (the frame when flat)
         self._pil_cache = None
         self._frame_cache = None        # (key, warped frame picture) for the background window
         self._applied_key = ""          # transparency key currently set on the background window ("" = none)
@@ -153,8 +165,7 @@ class OverlayWindow:
         self.win.title(f"EDHud {panel_id}")
         self.win.overrideredirect(True)
         self.win.configure(bg=COLORS["bg"])
-        self.bgcanvas = tk.Canvas(self.win, bg=COLORS["bg"], highlightthickness=1, bd=0,
-                                  highlightbackground=COLORS["border"], highlightcolor=COLORS["border"])
+        self.bgcanvas = tk.Canvas(self.win, bg=COLORS["bg"], highlightthickness=0, bd=0)
         self.bgcanvas.pack()
         self.twin = None
         self.canvas = self.bgcanvas
@@ -253,10 +264,20 @@ class OverlayWindow:
 
     def set_locked(self, locked):
         self.locked = bool(locked)
-        col = COLORS["border"] if self.locked else BORDER_UNLOCKED
-        self.bgcanvas.configure(highlightbackground=col, highlightcolor=col)
         self._apply_platform_style()
         self._last_key = None
+
+    def set_frame(self, vertical, horizontal):
+        """Border thickness in px: `vertical` = left/right edges, `horizontal` = top/bottom edges; 0 turns that pair off."""
+        frame = (max(0, int(vertical)), max(0, int(horizontal)))
+        if frame != self._frame:
+            self._frame = frame
+            self._last_key = None
+
+    def _eff_frame(self):
+        """The frame actually drawn: an unlocked panel always shows at least a 1px edge so it can be found and dragged."""
+        vt, ht = self._frame
+        return (vt, ht) if self.locked else (max(vt, 1), max(ht, 1))
 
     def set_position(self, x, y):
         self.x, self.y = int(x), int(y)
@@ -334,7 +355,7 @@ class OverlayWindow:
         if not lines:
             self.hide()
             return
-        key = (repr(lines), self.locked, self._font_family, self.font.cget("size"), self.curve, _palette_version)
+        key = (repr(lines), self.locked, self._font_family, self.font.cget("size"), self.curve, _palette_version, self._eff_frame())
         if key == self._last_key and self.visible:
             return
         self._last_key = key
@@ -406,7 +427,7 @@ class OverlayWindow:
             x = PAD
             if ln.get("rule_above"):
                 y += pad_g
-                c.create_line(PAD, y, total_w - PAD, y, fill=COLORS["border"])
+                c.create_line(PAD, y, total_w - PAD, y, fill=COLORS["rule"])
                 y += pad_g
             if ln.get("cbar"):
                 self._draw_cbar(c, ln["cbar"], y, total_w)
@@ -420,14 +441,14 @@ class OverlayWindow:
             y += self._row_h(ln)
             if i in rules and ln.get("pad"):      # padded title row: room below the text, the divider, room again
                 y += pad_g
-                c.create_line(PAD, y, total_w - PAD, y, fill=COLORS["border"])
+                c.create_line(PAD, y, total_w - PAD, y, fill=COLORS["rule"])
                 y += pad_g + 1
             elif i in rules:
-                c.create_line(PAD, y - 1, total_w - PAD, y - 1, fill=COLORS["border"])
+                c.create_line(PAD, y - 1, total_w - PAD, y - 1, fill=COLORS["rule"])
             if ln.get("box") and not (i + 1 < len(lines) and lines[i + 1].get("box")):
                 # header drawn like its own window: full-width border line, attached to the body below it
                 y += pad_g
-                c.create_line(0, y, total_w + 2, y, fill=COLORS["border"])
+                c.create_line(0, y, total_w + 2, y, fill=COLORS["rule"])
                 y += pad_g + 1
         if hint:
             c.create_text(PAD, y, anchor="nw", text="drag to move", font=self.font, fill=COLORS["accent"])
@@ -438,8 +459,7 @@ class OverlayWindow:
         """Switch the background window between 'flat box with a frame' and 'colour-keyed picture of the warped panel'."""
         changed = curved != self._curved
         self._curved = curved
-        self._twin_inset = 0 if curved else 1
-        self.bgcanvas.configure(highlightthickness=0 if curved else 1)
+        self._twin_inset = (0, 0) if curved else self._eff_frame()
         if self.dual:
             key = self._bg_key_hex if curved else ""
             if key != self._applied_key:
@@ -455,22 +475,35 @@ class OverlayWindow:
     def _present_flat(self, total_w, total_h):
         self._set_window_mode(False)
         self._origin = (0, 0)
+        vt, ht = self._eff_frame()
+        W, H = total_w + 2 * vt, total_h + 2 * ht
         if self.bgcanvas is not self.canvas:
             self.bgcanvas.delete("all")          # drop a curved picture left from before
-        self.bgcanvas.configure(bg=COLORS["bg"])
+        self.bgcanvas.configure(bg=COLORS["bg"], width=W, height=H)
         self.win.configure(bg=COLORS["bg"])
-        self.canvas.configure(width=total_w, height=total_h)
         if self.bgcanvas is not self.canvas:
-            self.bgcanvas.configure(width=total_w, height=total_h)
-        self._size = (total_w + 2, total_h + 2)   # + highlight border of the background window
+            self.canvas.configure(width=total_w, height=total_h)
+        else:
+            self.bgcanvas.move("all", vt, ht)    # single window: the content sits inside the frame
+        self._draw_frame(W, H, vt, ht)
+        self._size = (W, H)                      # content + the frame on each side
         self._inner = (total_w, total_h)
         self._photos = []
         self._place()
 
+    def _draw_frame(self, W, H, vt, ht):
+        """The window border on the background canvas: top/bottom bars of `ht` px, left/right bars of `vt` px."""
+        col = COLORS["border"] if self.locked else BORDER_UNLOCKED
+        c = self.bgcanvas
+        for x0, y0, x1, y1 in ((0, 0, W, ht), (0, H - ht, W, H), (0, 0, vt, H), (W - vt, 0, W, H)):
+            if x1 > x0 and y1 > y0:
+                c.create_rectangle(x0, y0, x1, y1, fill=col, outline="", width=0)
+
     def _curved_images(self, pc, total_w, total_h):
         """Warped, softened pictures for the current look: (geometry, {"bg": img, "text": img}) or {"all": img}."""
         S = edhud_curve.SUPERSAMPLE
-        W, H = total_w + 2, total_h + 2                 # flat size including the 1px frame
+        vt, ht = self._eff_frame()
+        W, H = total_w + 2 * vt, total_h + 2 * ht       # flat size including the frame
         geom = edhud_curve.geometry(W, H, self.curve)
         bg = edhud_curve.hex_rgb(COLORS["bg"])
         border_hex = COLORS["border"] if self.locked else BORDER_UNLOCKED
@@ -478,14 +511,14 @@ class OverlayWindow:
         if self.dual:
             self._bg_key = edhud_curve.pick_key(bg, border)
             # the frame picture depends only on size/colours/settings, so it is reused while the content changes
-            fkey = (W, H, bg, border, self.curve, self._bg_key)
+            fkey = (W, H, bg, border, self.curve, self._bg_key, vt, ht)
             if self._frame_cache is None or self._frame_cache[0] != fkey:
-                frame = pc.rasterize(W, H, bg, S, border=border, content=False)
+                frame = pc.rasterize(W, H, bg, S, border=border, content=False, frame=(vt, ht))
                 self._frame_cache = (fkey, edhud_curve.warp(frame, geom, self.curve, self._bg_key))
-            text = pc.rasterize(W, H, bg, S)
+            text = pc.rasterize(W, H, bg, S, offset=(vt, ht))
             layers = {"bg": self._frame_cache[1], "text": edhud_curve.warp(text, geom, self.curve, bg)}
         else:
-            whole = pc.rasterize(W, H, bg, S, border=border)
+            whole = pc.rasterize(W, H, bg, S, border=border, offset=(vt, ht), frame=(vt, ht))
             layers = {"all": edhud_curve.warp(whole, geom, self.curve, bg)}
         return geom, layers
 
@@ -532,13 +565,14 @@ class OverlayWindow:
         c.create_text(total_w - PAD, by, anchor="ne", text=right, font=self.font, fill=COLORS.get(rstyle, COLORS["text"]))
         x0, x1 = PAD + lab_w, total_w - PAD - rw
         top, bottom = by + 2, by + self.line_h - 3
-        c.create_rectangle(x0, top, x1, bottom, outline=COLORS["border"], fill=BAR_TRACK_FILL)
+        c.create_rectangle(x0, top, x1, bottom, outline=COLORS["rule"], fill=BAR_TRACK_FILL)
         track = max(1, x1 - x0 - 2)
         cap = spec.get("capacity") or max(1, spec.get("total", 0))
         x = x0 + 1
         small, label_end = [], x0
         colors = edhud_cargo.palette_for([(it[3], it[0]) for it in items])
         for (name, count, mission, key), fill in zip(items, colors):
+            fill = lum(fill)                                         # the luminosity setting covers the commodity colours too
             w = max(3, int(round(track * count / cap)))
             w = min(w, x1 - 1 - x)
             if w <= 0:
@@ -579,7 +613,7 @@ class OverlayWindow:
             except ValueError:
                 frac = 0.0
             top, bottom = y + 3, y + self.line_h - 5
-            c.create_rectangle(x, top, x + self._bar_w, bottom, outline=COLORS["border"], fill=BAR_TRACK_FILL)
+            c.create_rectangle(x, top, x + self._bar_w, bottom, outline=COLORS["rule"], fill=BAR_TRACK_FILL)
             if frac > 0:
                 c.create_rectangle(x, top, x + max(2, self._bar_w * frac), bottom, outline=color, fill=color)
             return self._bar_w
@@ -592,8 +626,8 @@ class OverlayWindow:
         self.win.geometry(f"{w}x{h}+{self.x + ox}+{self.y + oy}")
         if self.twin is not None:
             iw, ih = getattr(self, "_inner", (w - 2, h - 2))
-            k = self._twin_inset      # flat: inside the background window's 1px border; curved: same box exactly
-            self.twin.geometry(f"{iw}x{ih}+{self.x + ox + k}+{self.y + oy + k}")
+            kx, ky = self._twin_inset  # flat: inside the background window's frame; curved: same box exactly
+            self.twin.geometry(f"{iw}x{ih}+{self.x + ox + kx}+{self.y + oy + ky}")
 
     def show(self):
         if not self.visible:

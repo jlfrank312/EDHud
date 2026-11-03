@@ -27,6 +27,7 @@ log = logging.getLogger("EDMarketConnector.EDHud")
 UNSET = -99999
 TICK_MS = 500
 TOPMOST_REASSERT_S = 3.0
+MAX_BORDER_PX = 8
 DEFAULTS = {"enabled": 1, "font_size": 11, "opacity": 88, "text_opacity": 100, "locked": 1,
             "cargo_combined": 1,     # 1 = cargo sits under the missions panel, 0 = its own window
             "cargo_bar": 1,          # 1 = proportional bar, 0 = itemised list
@@ -37,7 +38,12 @@ DEFAULTS = {"enabled": 1, "font_size": 11, "opacity": 88, "text_opacity": 100, "
             "curve_side": 1,
             "match_theme": 0,        # 1 = take the colours from the active EDHM UI HUD theme (0 = EDHud's own colours)
             "keep_state_colors": 1,  # with match_theme: 1 = keep EDHud's own good/warn/bad/dest mission-state colours
-            "match_payout": 0}       # with match_theme: 1 = payout column follows the theme (0 = stays green)         # 1 = panels sit on the right of the view, 0 = on the left (negative strength in the UI)
+            "match_payout": 0,
+            "border_v_on": 1,        # window border: left/right edges on/off
+            "border_v_px": 1,        # ... and their thickness (px)
+            "border_h_on": 1,        # window border: top/bottom edges on/off
+            "border_h_px": 1,        # ... and their thickness (px)
+            "luminosity": 100}       # % - scales the brightness of every EDHud colour (20-150)       # with match_theme: 1 = payout column follows the theme (0 = stays green)         # 1 = panels sit on the right of the view, 0 = on the left (negative strength in the UI)
 
 
 class Settings:
@@ -153,6 +159,13 @@ class Controller:
             screen_w=screen_w,
             tilt=max(0, min(100, self.settings.get("curve_tilt"))))
 
+    def _frame_params(self):
+        """(vertical edge px, horizontal edge px) for the window border; 0 = that pair of edges is off."""
+        st = self.settings
+        v = max(1, min(MAX_BORDER_PX, st.get("border_v_px"))) if st.get("border_v_on") else 0
+        h = max(1, min(MAX_BORDER_PX, st.get("border_h_px"))) if st.get("border_h_on") else 0
+        return v, h
+
     def _create_windows(self):
         n = load_theme(os.path.join(self.plugin_dir, "edhud_theme.json"))
         if n:
@@ -169,6 +182,7 @@ class Controller:
                     text_opacity=self.settings.get("text_opacity") / 100.0,
                     locked=bool(self.settings.get("locked")),
                     curve=self._curve_params(),
+                    frame=self._frame_params(),
                 )
             except Exception:
                 log.exception("could not create overlay window %s", p["id"])
@@ -322,8 +336,9 @@ class Controller:
         match = bool(st.get("match_theme"))
         keep = bool(st.get("keep_state_colors"))
         payout = bool(st.get("match_payout"))
+        lum = max(edhud_edhm.LUMINOSITY_MIN, min(edhud_edhm.LUMINOSITY_MAX, st.get("luminosity")))
         ini_dir, note = (edhud_edhm.locate(st.get_str("edhm_path", "")) if match else (None, None))
-        stamp = (match, keep, payout, ini_dir, edhud_edhm.theme_stamp(ini_dir) if ini_dir else None)
+        stamp = (match, keep, payout, lum, ini_dir, edhud_edhm.theme_stamp(ini_dir) if ini_dir else None)
         if not force and stamp == self._theme_stamp:
             return
         self._theme_stamp = stamp
@@ -332,7 +347,7 @@ class Controller:
         except Exception:
             log.exception("EDHM theme matching failed; using EDHud's own colours")
             pal, rep = dict(BASE_COLORS), {"error": "theme could not be read"}
-        apply_palette(pal)
+        apply_palette(pal, lum)
         self._last_version = None
         self._theme_status_text = self._describe_theme(match, note, rep)
         if self._theme_status is not None:
@@ -405,6 +420,11 @@ class Controller:
             "keep_state_colors": tk.IntVar(value=self.settings.get("keep_state_colors")),
             "match_payout": tk.IntVar(value=self.settings.get("match_payout")),
             "edhm_path": tk.StringVar(value=self.settings.get_str("edhm_path", "")),
+            "border_v_on": tk.IntVar(value=self.settings.get("border_v_on")),
+            "border_v_px": tk.IntVar(value=self.settings.get("border_v_px")),
+            "border_h_on": tk.IntVar(value=self.settings.get("border_h_on")),
+            "border_h_px": tk.IntVar(value=self.settings.get("border_h_px")),
+            "luminosity": tk.IntVar(value=self.settings.get("luminosity")),
         }
         for p in PANELS:
             v[f"{p['id']}_on"] = tk.IntVar(value=1 if self.settings.panel_on(p) else 0)
@@ -446,6 +466,16 @@ class Controller:
         ttk.Spinbox(frame, from_=30, to=100, increment=5, width=5, textvariable=v["text_opacity"]).grid(row=r, column=1, sticky="w")
         nb.Label(frame, text="(separate from window opacity on Windows)").grid(row=r, column=2, sticky="w", padx=(6, 0))
         r += 1
+        r = self._slider_row(nb, frame, r, "Luminosity %", v["luminosity"], edhud_edhm.LUMINOSITY_MIN, edhud_edhm.LUMINOSITY_MAX,
+                             note="(brightness of the whole HUD; 100 = as themed)")
+        nb.Checkbutton(frame, text="Window border: vertical edges (left / right)", variable=v["border_v_on"],
+                       command=self.apply_prefs).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        r += 1
+        r = self._slider_row(nb, frame, r, "   Thickness (px)", v["border_v_px"], 1, MAX_BORDER_PX)
+        nb.Checkbutton(frame, text="Window border: horizontal edges (top / bottom)", variable=v["border_h_on"],
+                       command=self.apply_prefs).grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        r = self._slider_row(nb, frame, r, "   Thickness (px)", v["border_h_px"], 1, MAX_BORDER_PX)
         have_pil = edhud_curve.available()
         nb.Checkbutton(frame, text="Cockpit curvature: angle the panels like the in-game cockpit screens (slightly soft)"
                        if have_pil else "Cockpit curvature (unavailable: Pillow not found)",
@@ -492,11 +522,31 @@ class Controller:
         nb.Button(frame, text="Show 15 s demo", command=lambda: self.demo(15)).grid(row=r, column=0, sticky="w", pady=(10, 0))
         nb.Button(frame, text="Reset positions", command=self.reset_positions).grid(row=r, column=1, sticky="w", pady=(10, 0))
         r += 1
-        for name in ("font_size", "opacity", "text_opacity", "curve_strength", "curve_tilt", "curve_soft", "edhm_path"):
+        for name in ("font_size", "opacity", "text_opacity", "curve_strength", "curve_tilt", "curve_soft", "edhm_path",
+                     "luminosity", "border_v_px", "border_h_px"):
             v[name].trace_add("write", lambda *a: self._live())      # spinboxes / the path apply as you change them
         nb.Label(frame, text="Tip: the game must be in Borderless or Windowed mode for overlays to appear over it.").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return frame
+
+    def _slider_row(self, nb, frame, r, label, var, lo, hi, note=None):
+        """A labelled horizontal slider with its current value shown beside it. Returns the next free row."""
+        nb.Label(frame, text=label).grid(row=r, column=0, sticky="w")
+        ttk.Scale(frame, from_=lo, to=hi, orient="horizontal", length=170, variable=var).grid(row=r, column=1, sticky="w")
+        shown = tk.StringVar(value=str(self._int(var, lo, hi, lo)))
+        var.trace_add("write", lambda *a: shown.set(str(self._int(var, lo, hi, lo))))
+        nb.Label(frame, textvariable=shown, width=4).grid(row=r, column=2, sticky="w")
+        if note:
+            nb.Label(frame, text=note).grid(row=r, column=3, sticky="w")
+        return r + 1
+
+    @staticmethod
+    def _int(var, lo, hi, default):
+        """Read a slider/spinbox variable as an int within [lo, hi] (sliders store floats)."""
+        try:
+            return max(lo, min(hi, int(round(float(var.get())))))
+        except (tk.TclError, ValueError, TypeError):
+            return default
 
     def apply_prefs(self):
         """prefs_changed: persist and apply immediately."""
@@ -511,6 +561,12 @@ class Controller:
         self.settings.set("match_theme", v["match_theme"].get())
         self.settings.set("keep_state_colors", v["keep_state_colors"].get())
         self.settings.set("match_payout", v["match_payout"].get())
+        self.settings.set("border_v_on", v["border_v_on"].get())
+        self.settings.set("border_h_on", v["border_h_on"].get())
+        self.settings.set("border_v_px", self._int(v["border_v_px"], 1, MAX_BORDER_PX, self.settings.get("border_v_px")))
+        self.settings.set("border_h_px", self._int(v["border_h_px"], 1, MAX_BORDER_PX, self.settings.get("border_h_px")))
+        self.settings.set("luminosity", self._int(v["luminosity"], edhud_edhm.LUMINOSITY_MIN, edhud_edhm.LUMINOSITY_MAX,
+                                                  self.settings.get("luminosity")))
         self.settings.set_str("edhm_path", edhud_edhm.clean_manual_path(v["edhm_path"].get()))
         for w in self._theme_dependents:
             try:
@@ -541,6 +597,7 @@ class Controller:
             win.set_text_opacity(self.settings.get("text_opacity") / 100.0)
             win.set_locked(bool(self.settings.get("locked")))
             win.set_curve(self._curve_params())
+            win.set_frame(*self._frame_params())
         if hasattr(self, "toggle_var"):
             self.toggle_var.set(self.settings.get("enabled"))
         self._last_version = None

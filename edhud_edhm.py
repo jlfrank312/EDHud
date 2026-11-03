@@ -19,12 +19,12 @@ import json
 import os
 import re
 
-PALETTE_KEYS = ("title", "head", "text", "dim", "good", "warn", "bad", "accent", "dest", "pay", "bg", "border")
+PALETTE_KEYS = ("title", "head", "text", "dim", "good", "warn", "bad", "accent", "dest", "pay", "bg", "border", "rule")
 STATE_KEYS = ("good", "warn", "bad", "dest")
 
 # role -> (mode_file, mode_key, color_file, (r_key, g_key, b_key)); keys are EDHM v22.03.
 ROLE_SOURCES = {
-    "title":  ("Startup-Profile", "x75",  "Advanced", ("x76", "y76", "z76")),     # Side Panels / Main Lines
+    "border": ("Startup-Profile", "x75",  "Advanced", ("x76", "y76", "z76")),     # Side Panels / Main Lines -> window border ONLY
     "text":   ("Startup-Profile", "w75",  "Advanced", ("x77", "y77", "z77")),     # HUD Settings / Main Text
     "accent": ("Startup-Profile", "y137", "Advanced", ("x233", "y233", "z233")),  # Chat Panel / Icons
 }
@@ -37,16 +37,18 @@ THEMED = ("custom", "xml-matrix")
 ELITE_ORANGE = (1.0, 0.4352, 0.0)
 MATRIX_KEYS = (("x150", "y150", "z150"), ("x151", "y151", "z151"), ("x152", "y152", "z152"))
 
-# Hand-set tunables (not derived): a theme is "monochrome" if title is within MONO_DISTANCE
-# (sRGB euclidean, 0..441) of text; text then steps MONO_TEXT_STEP toward bg so title/head stay on top.
+# Hand-set tunables (not derived): the report flags a theme as "monochrome" when accent is within
+# MONO_DISTANCE (sRGB euclidean, 0..441) of text.  Informational only.
 MONO_DISTANCE = 25
-MONO_TEXT_STEP = 0.15
 # Minimum contrast ratio vs bg for text-bearing roles (WCAG: 4.5 normal text, 3 large/bold text).
-MIN_CONTRAST = {"text": 4.5, "title": 3.0, "accent": 3.0, "dim": 3.0}
+MIN_CONTRAST = {"text": 4.5, "accent": 3.0, "dim": 3.0}
+STATE_MIN_CONTRAST = 3.0     # themed state colours (keep_state_colors off) are lifted to at least this
+# User-facing luminosity scale (percent): <=100 darkens (multiplies), >100 blends toward white by (pct-100)/2 %.
+LUMINOSITY_MIN, LUMINOSITY_MAX = 20, 150
 
 # When state colours are NOT preserved, state styles take theme colours (PROVISIONAL: in a
 # monochrome theme the distinction needs emphasis cues - bold/prefix - that panels don't have yet).
-STATE_FROM_THEME = {"good": "head", "warn": "title", "bad": "title", "dest": "accent"}
+STATE_FROM_THEME = {"good": "head", "warn": "accent", "bad": "border", "dest": "accent"}
 # Payout column: its own style (not mission state). Default = EDHud's current green (base["pay"]);
 # with the match_payout switch (and theme matching ON) it takes this theme role instead.
 PAYOUT_FROM_THEME = "head"
@@ -112,6 +114,16 @@ def ensure_contrast(h, bg, ratio):
         else:
             lo = mid
     return mix(h, "#ffffff", hi)
+
+
+def scale_luminosity(h, pct):
+    """Scale a #rrggbb colour's brightness: pct 100 = unchanged, <100 darker, >100 lighter (toward white)."""
+    f = max(LUMINOSITY_MIN, min(LUMINOSITY_MAX, pct)) / 100.0
+    if f == 1.0:
+        return h
+    if f < 1.0:
+        return mix(h, "#000000", 1.0 - f)
+    return mix(h, "#ffffff", (f - 1.0) * 0.5)
 
 
 def apply_matrix(matrix, base=ELITE_ORANGE):
@@ -232,6 +244,7 @@ def build_palette(base, ini_dir=None, match_theme=False, keep_state_colors=True,
     """
     base = dict(base)
     base.setdefault("pay", base["good"])  # older base without a pay style: payout stayed `good`
+    base.setdefault("rule", base["border"])  # older base without a rule style: dividers used the border colour
     report = {"matched": False, "theme": None, "author": None, "version": None,
               "monochrome": False, "sources": {}, "lifted": [], "warnings": [], "error": None}
     pal = {k: base[k] for k in PALETTE_KEYS}
@@ -266,31 +279,34 @@ def build_palette(base, ini_dir=None, match_theme=False, keep_state_colors=True,
         report["sources"][role] = why
         if hexv:
             pal[role] = hexv
-    # The theme's design wins: a role the theme does not supply takes the theme's TEXT colour,
-    # never EDHud's static colour, so no hue is introduced that the theme does not contain.
+    # Roles (the theme's design wins):
+    #   text   <- HUD Settings / Main Text   -> titles and all non-accented text
+    #   accent <- Chat Panel / Icons         -> accented text only
+    #   border <- Side Panels / Main Lines   -> the window border ONLY
+    # A role the theme does not supply takes the theme's text colour, never EDHud's static colour.
     raw_text = pal["text"]
-    for role in ("title", "accent"):
+    for role in ("border", "accent"):
         if report["sources"][role] not in THEMED:
             pal[role] = raw_text
-    # Monochrome themes keep hierarchy through brightness tiers instead of hue.
-    mono = color_distance(pal["title"], raw_text) < MONO_DISTANCE
-    if mono:
-        pal["text"] = mix(raw_text, base["bg"], MONO_TEXT_STEP)
-    report["monochrome"] = mono
     bg = base["bg"]  # transparent colour key of the text window: never themed
-    raw_title = pal["title"]
-    pal["head"] = mix(raw_text, "#ffffff", 0.35)
-    pal["dim"] = mix(pal["text"], bg, 0.50)
-    pal["border"] = mix(raw_title, bg, 0.45)  # lines/outlines: the theme's own line colour
     # Legibility floor (only acts when a themed colour is too dark for text on EDHud's dark bg):
     # lighten toward white by the smallest amount that reaches the ratio, keeping the hue.
     lifted = []
-    for role, floor in (("text", MIN_CONTRAST["text"]), ("title", MIN_CONTRAST["title"]),
-                        ("accent", MIN_CONTRAST["accent"]), ("dim", MIN_CONTRAST["dim"])):
-        new = ensure_contrast(pal[role], bg, floor)
+
+    def floor(role, ratio):
+        new = ensure_contrast(pal[role], bg, ratio)
         if new != pal[role]:
             lifted.append(role)
             pal[role] = new
+
+    floor("text", MIN_CONTRAST["text"])
+    floor("accent", MIN_CONTRAST["accent"])
+    pal["dim"] = mix(pal["text"], bg, 0.50)
+    floor("dim", MIN_CONTRAST["dim"])
+    pal["title"] = pal["text"]
+    pal["head"] = mix(pal["text"], "#ffffff", 0.35)
+    pal["rule"] = pal["border"]       # divider lines / bar outlines follow the window border colour
+    report["monochrome"] = color_distance(pal["accent"], pal["text"]) < MONO_DISTANCE
     report["lifted"] = lifted
     pal["bg"] = bg
     if keep_state_colors:
@@ -298,7 +314,7 @@ def build_palette(base, ini_dir=None, match_theme=False, keep_state_colors=True,
             pal[k] = base[k]
     else:
         for k, src in STATE_FROM_THEME.items():
-            pal[k] = pal[src]
+            pal[k] = ensure_contrast(pal[src], bg, STATE_MIN_CONTRAST)
     pal["pay"] = pal[PAYOUT_FROM_THEME] if match_payout else base["pay"]
     report["matched"] = True
     return pal, report

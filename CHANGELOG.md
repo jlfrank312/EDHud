@@ -3,11 +3,18 @@
 ## 0.1.5
 - New, optional **Match colours to the active EDHM UI HUD theme** (File > Settings > ED HUD, **off by default** - with it off
   EDHud keeps exactly the colours it had in 0.1.4). When on, EDHud reads the theme EDHM UI has applied (the `EDHM-ini`
-  folder next to the game) and takes `title` from Side Panels / Main Lines, `text` from HUD Settings / Main Text and
-  `accent` from Chat Panel / Icons; `head`, `dim` and `border` are blends of those; `bg` is never themed. Custom colours and
-  XML-matrix colours are both understood; an element the theme leaves at Elite default takes the theme's text colour, so a
-  monochrome theme gives a monochrome HUD (brightness tiers, no added hue). Colours too dark to read on EDHud's background
-  are lightened just enough, keeping their hue. Changes (including F11 reloads in game) apply within about a second.
+  folder next to the game): **HUD Settings / Main Text** colours the titles and all non-accented text, **Chat Panel / Icons**
+  colours the accented text (origin, mission cargo, wing marker), and **Side Panels / Main Lines** colours the **window
+  border only**. Dimmer text is a tier of the text colour, the divider lines and bar outlines inside the panel use the border colour; `bg` is never themed.
+  Custom and XML-matrix colours are both understood; an element the theme leaves at Elite default takes the theme's text
+  colour. Colours too dark to read on EDHud's background are lightened just enough, keeping their hue. Changes (including
+  F11 reloads in game) apply within about a second.
+- **Window border toggles and thickness**: separate on/off switches and 1-8 px sliders for the vertical (left/right) and
+  horizontal (top/bottom) edges. Defaults (both on, 1 px) look as before. While the panels are unlocked for dragging a
+  1 px edge is always shown so they can be found. Works with cockpit curvature too.
+- **Luminosity slider** (20-150 %, default 100): scales the brightness of every EDHud colour - text, border, dividers, state
+  colours and the cargo-bar commodity colours - to match the rest of the cockpit UI, with or without theme matching.
+  Below 100 darkens; above 100 blends toward white. The background colour is unchanged (use Window opacity for that).
 - **Keep EDHud's own mission-state colours** (default on): green / amber / red stay as they are while matching.
 - **Payout column has its own `pay` colour** (default: the same green as before). **Match the payout column to the theme**
   (default off) makes it follow the theme. `"pay"` can also be set in `edhud_theme.json`.
@@ -15,7 +22,7 @@
   you enter is used (the `EDHM-ini` folder, a copy of it, or the game's `elite-dangerous-odyssey-64` folder). A wrong path
   is reported in the dialog and never silently replaced.
 - Targets EDHM UI v22.03 theme files; other versions show a warning in the dialog.
-- New `edhud_edhm.py` and `tests/test_edhm.py`.
+- New `edhud_edhm.py` and `tests/test_edhm.py`; `edhud_theme.json` gains optional `pay` and `rule` (divider/bar-outline) colours (`rule` follows `border` unless set).
 
 ## 0.1.4
 - Cockpit curvature gets a **Tilt %** setting (default 30 = 7.5 degrees, 100 = 25): the panel is rotated in the plane of the
