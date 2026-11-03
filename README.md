@@ -98,8 +98,13 @@ Everything below applies immediately, no need to press OK.
 - **Window opacity / Text opacity** - background and text fade separately (two stacked windows on Windows).
 - **Lock position** - untick to drag panels; your real data stays on screen. Only "Show 15 s demo" shows test data.
 - **Cockpit curvature** (off by default) - angles the panels like the in-game cockpit screens instead of a flat sheet:
-  turned about the vertical axis in perspective (nearer edge taller) plus a very slight depth-of-field softness that grows
-  towards the far edge. *Curve strength %* (50 = 14 degrees, 100 = 28) and *Softness %* (0 = crisp) apply live. Written for
-  panels on the right of the view (a left-hand mirror exists internally but has no setting yet). Needs Pillow
-  (bundled with EDMC). Dragging, click-through and the opacity settings work as before.
+  turned about the vertical axis in perspective (nearer edge taller), tilted in the screen plane, plus a very slight
+  depth-of-field softness that grows towards the far edge.
+  * *Curve strength %* (50 = 14 degrees, 100 = 28): **positive = panel on the right of the screen, negative = on the left**
+    (mirrors the turn, the tilt and the pivot).
+  * *Tilt %* (30 = 7.5 degrees, 100 = 25): rotates the panel with its outer edge rising, about its **inner-bottom corner**
+    (bottom-left for a right-hand panel, bottom-right for a left-hand one). That corner is the anchor: it stays where the
+    flat panel's corner was, so place the panel with that corner where you want it.
+  * *Softness %* (0 = crisp).
+  All apply live. Needs Pillow (bundled with EDMC). Dragging, click-through and the opacity settings work as before.
 - Colours: `edhud_theme.json` (see the file). `"commodity_colors": {"gold": "#ffcc00"}` recolours cargo-bar items.

@@ -1,7 +1,11 @@
 """
 EDHud "cockpit curvature": makes a panel look like it sits on the curved cockpit view-screen instead of a flat sheet,
 like the game's own Info / side panels - the panel is turned about the vertical axis (so the edge nearer the pilot is a
-little taller than the far one) and gets a very slight depth-of-field softness that grows towards the far edge.
+little taller than the far one), optionally tilted in the plane of the screen (like the slope of the cockpit's Info bar),
+and gets a very slight depth-of-field softness that grows towards the far edge.
+
+The panel's inner-bottom corner - bottom-left for a panel on the right of the view, bottom-right for one on the left -
+is the anchor: it stays exactly where the flat panel's corner was, and the tilt pivots about it.
 
 Tk windows cannot be skewed, so the panel is drawn into a Pillow image instead of onto the Tk canvas, warped with a
 perspective transform, softened, and handed back to the overlay as a picture. Pillow ships with EDMC; if it is missing
@@ -29,6 +33,7 @@ def available():
 
 SUPERSAMPLE = 2          # draw/warp at 2x, then shrink: smooth edges on the slanted lines
 MAX_YAW_DEG = 28.0       # panel turn at "strength 100"
+MAX_TILT_DEG = 25.0      # in-plane tilt at "tilt 100"
 EYE_DIST_FACTOR = 0.9    # viewer distance as a multiple of the screen width (smaller = stronger perspective)
 MAX_BLUR_PX = 1.6        # blur radius (px) on the far edge at "softness 100"
 NEAR_BLUR = 0.2          # the near edge keeps this fraction of the far-edge blur (the whole panel is a bit off focus)
@@ -41,10 +46,16 @@ class CurveParams:
     soft: int = 40           # 0-100: depth-of-field softness (100 = MAX_BLUR_PX on the far edge)
     side: int = 1            # +1 = panel on the right of the view (right edge nearer), -1 = on the left
     screen_w: int = 1920     # used for the perspective strength
+    tilt: int = 30           # 0-100: in-plane tilt, outer edge rising (100 = MAX_TILT_DEG)
 
     @property
     def yaw_deg(self):
         return max(0, min(100, int(self.strength))) / 100.0 * MAX_YAW_DEG * (1 if self.side >= 0 else -1)
+
+    @property
+    def tilt_deg(self):
+        """Signed so that positive lifts the right edge (right-hand panel); the left-hand panel is the mirror image."""
+        return max(0, min(100, int(self.tilt))) / 100.0 * MAX_TILT_DEG * (1 if self.side >= 0 else -1)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -60,18 +71,29 @@ class Geometry:
 
 def geometry(w, h, params):
     """
-    Where the flat w x h panel lands after being turned by params.yaw_deg about its own vertical centre line and
-    viewed in perspective. The panel centre does not move, so switching the effect on/off does not shift the panel.
+    Where the flat w x h panel lands: turned by params.yaw_deg about its vertical centre line and viewed in
+    perspective, then moved so its inner-bottom corner sits where the flat panel's did (bottom-left for side +1,
+    bottom-right for side -1), then rotated by params.tilt_deg about that corner. Switching the effect on/off or
+    changing the settings therefore never moves the anchor corner, which is the point to place the panel by.
     """
     th = math.radians(params.yaw_deg)
     dist = max(200.0, EYE_DIST_FACTOR * max(200, params.screen_w))
     cx, cy = w / 2.0, h / 2.0
     pts = []
-    for x, y in ((-cx, -cy), (cx, -cy), (cx, cy), (-cx, cy)):
+    for x, y in ((-cx, -cy), (cx, -cy), (cx, cy), (-cx, cy)):          # TL, TR, BR, BL
         xr = x * math.cos(th)
         z = -x * math.sin(th)                    # positive yaw: the right edge comes towards the viewer
         s = dist / (dist + z)
         pts.append((xr * s + cx, y * s + cy))
+    right = params.side >= 0
+    pivot = pts[3] if right else pts[2]          # inner-bottom corner: BL for a right-hand panel, BR for a left-hand one
+    anchor = (0.0, float(h)) if right else (float(w), float(h))
+    pts = [(px - pivot[0] + anchor[0], py - pivot[1] + anchor[1]) for px, py in pts]
+    phi = math.radians(params.tilt_deg)
+    if phi:
+        c, sn = math.cos(phi), math.sin(phi)     # screen y points down: positive phi lifts what is to the right of the pivot
+        pts = [(anchor[0] + (px - anchor[0]) * c + (py - anchor[1]) * sn,
+                anchor[1] - (px - anchor[0]) * sn + (py - anchor[1]) * c) for px, py in pts]
     ox = math.floor(min(p[0] for p in pts)) - 1
     oy = math.floor(min(p[1] for p in pts)) - 1
     bw = int(math.ceil(max(p[0] for p in pts))) - ox + 1

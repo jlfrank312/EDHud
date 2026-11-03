@@ -30,9 +30,10 @@ DEFAULTS = {"enabled": 1, "font_size": 11, "opacity": 88, "text_opacity": 100, "
             "cargo_combined": 1,     # 1 = cargo sits under the missions panel, 0 = its own window
             "cargo_bar": 1,          # 1 = proportional bar, 0 = itemised list
             "curve": 0,              # 1 = cockpit curvature: panels angled + slightly soft like the in-game screens
-            "curve_strength": 50,    # 0-100, how far the panel is turned
+            "curve_strength": 50,    # 0-100 (stored as a magnitude; the side is curve_side), how far the panel is turned
+            "curve_tilt": 30,        # 0-100, in-plane tilt about the inner-bottom corner
             "curve_soft": 40,        # 0-100, depth-of-field softness towards the far edge
-            "curve_side": 1}         # 1 = panels sit on the right of the view, 0 = on the left (no UI yet)
+            "curve_side": 1}         # 1 = panels sit on the right of the view, 0 = on the left (negative strength in the UI)
 
 
 class Settings:
@@ -141,7 +142,8 @@ class Controller:
             strength=max(0, min(100, self.settings.get("curve_strength"))),
             soft=max(0, min(100, self.settings.get("curve_soft"))),
             side=1 if self.settings.get("curve_side") else -1,
-            screen_w=screen_w)
+            screen_w=screen_w,
+            tilt=max(0, min(100, self.settings.get("curve_tilt"))))
 
     def _create_windows(self):
         n = load_theme(os.path.join(self.plugin_dir, "edhud_theme.json"))
@@ -338,7 +340,10 @@ class Controller:
             "cargo_combined": tk.IntVar(value=self.settings.get("cargo_combined")),
             "cargo_bar": tk.IntVar(value=self.settings.get("cargo_bar")),
             "curve": tk.IntVar(value=self.settings.get("curve")),
-            "curve_strength": tk.IntVar(value=self.settings.get("curve_strength")),
+            # signed in the dialog: negative = panel on the left of the view (stored as magnitude + side flag, because
+            # EDMC's Windows config store is not reliable for negative numbers)
+            "curve_strength": tk.IntVar(value=self.settings.get("curve_strength") * (1 if self.settings.get("curve_side") else -1)),
+            "curve_tilt": tk.IntVar(value=self.settings.get("curve_tilt")),
             "curve_soft": tk.IntVar(value=self.settings.get("curve_soft")),
             "hotkey": tk.StringVar(value=normalise(self.settings.get_str("hotkey", ""))),
         }
@@ -389,7 +394,13 @@ class Controller:
                        state="normal" if have_pil else "disabled").grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         r += 1
         nb.Label(frame, text="   Curve strength %").grid(row=r, column=0, sticky="w")
-        ttk.Spinbox(frame, from_=0, to=100, increment=5, width=5, textvariable=v["curve_strength"]).grid(row=r, column=1, sticky="w")
+        ttk.Spinbox(frame, from_=-100, to=100, increment=5, width=5, textvariable=v["curve_strength"]).grid(row=r, column=1, sticky="w")
+        nb.Label(frame, text="(positive = panel on the right of the screen, negative = on the left)").grid(
+            row=r, column=2, sticky="w", padx=(6, 0))
+        r += 1
+        nb.Label(frame, text="   Tilt %").grid(row=r, column=0, sticky="w")
+        ttk.Spinbox(frame, from_=0, to=100, increment=5, width=5, textvariable=v["curve_tilt"]).grid(row=r, column=1, sticky="w")
+        nb.Label(frame, text="(rotates about the inner-bottom corner)").grid(row=r, column=2, sticky="w", padx=(6, 0))
         r += 1
         nb.Label(frame, text="   Softness (depth of field) %").grid(row=r, column=0, sticky="w")
         ttk.Spinbox(frame, from_=0, to=100, increment=5, width=5, textvariable=v["curve_soft"]).grid(row=r, column=1, sticky="w")
@@ -400,7 +411,7 @@ class Controller:
         nb.Button(frame, text="Show 15 s demo", command=lambda: self.demo(15)).grid(row=r, column=0, sticky="w", pady=(10, 0))
         nb.Button(frame, text="Reset positions", command=self.reset_positions).grid(row=r, column=1, sticky="w", pady=(10, 0))
         r += 1
-        for name in ("font_size", "opacity", "text_opacity", "curve_strength", "curve_soft"):
+        for name in ("font_size", "opacity", "text_opacity", "curve_strength", "curve_tilt", "curve_soft"):
             v[name].trace_add("write", lambda *a: self._live())      # spinboxes apply as you change them
         nb.Label(frame, text="Tip: the game must be in Borderless or Windowed mode for overlays to appear over it.").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
@@ -417,7 +428,11 @@ class Controller:
         self.settings.set("cargo_bar", v["cargo_bar"].get())
         self.settings.set("curve", v["curve"].get())
         try:
-            self.settings.set("curve_strength", max(0, min(100, int(v["curve_strength"].get()))))
+            signed = max(-100, min(100, int(v["curve_strength"].get())))
+            self.settings.set("curve_strength", abs(signed))
+            if signed:                                  # 0 has no side: keep the last one
+                self.settings.set("curve_side", 1 if signed > 0 else 0)
+            self.settings.set("curve_tilt", max(0, min(100, int(v["curve_tilt"].get()))))
             self.settings.set("curve_soft", max(0, min(100, int(v["curve_soft"].get()))))
         except (tk.TclError, ValueError):
             pass

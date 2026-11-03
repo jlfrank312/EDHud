@@ -1,12 +1,23 @@
 # Changelog
 
+## 0.1.4
+- Cockpit curvature gets a **Tilt %** setting (default 30 = 7.5 degrees, 100 = 25): the panel is rotated in the plane of the
+  screen, outer edge rising, like the slope of the cockpit's Info bar. The rotation pivots about the panel's
+  **inner-bottom corner** - bottom-left for a panel on the right of the view, bottom-right for one on the left.
+- That corner is now the **anchor** for the whole effect: it stays exactly where the flat panel's corner was while you change
+  strength, tilt or softness or switch the effect on/off (0.1.3 kept the panel's centre fixed instead).
+- **Curve strength % is now signed**: negative (-100..-1) = panel on the left of the screen. It mirrors the turn (left edge
+  nearer/taller), the tilt (left edge rising) and the pivot (bottom-right corner). Stored as a magnitude plus the existing
+  `edhud_curve_side` flag, so nothing negative goes into EDMC's config.
+- Tests: pivot/anchor, tilt direction and size, left/right mirror, signed-strength setting round trip.
+
 ## 0.1.3
 - New, optional **Cockpit curvature** (File > Settings > ED HUD, off by default): the panels are drawn as if they sit on
   the curved cockpit view-screen like the game's own Info / side panels - turned a little about the vertical axis in
   perspective (the edge nearer the pilot is taller, the far edge smaller) with a very slight depth-of-field softness that
   grows towards the far edge. *Curve strength %* sets how far the panel is turned (50 = 14 degrees), *Softness %* the
-  depth-of-field blur (0 = crisp). Both apply live. Panels are assumed to be on the right-hand side of the view; a
-  mirrored left-hand look exists internally (`edhud_curve_side` = 0) but has no setting in the dialog yet.
+  depth-of-field blur (0 = crisp). Both apply live. Panels are assumed to be on the right-hand side of the view
+  (0.1.4 adds the left-hand mirror).
 - How it works: the panel is drawn into a Pillow image (new `edhud_curve.py`), warped with a perspective transform and
   shown through the same two click-through, separately-fading windows as before (colour-keyed picture), so opacity,
   text opacity, click-through and dragging behave as in the flat panel. The panel centre does not move when the effect is
