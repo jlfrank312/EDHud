@@ -18,6 +18,7 @@ from edhud_hotkey import HotkeyListener, combo_from_event, normalise
 from edhud_overlay import OverlayWindow, load_theme
 from edhud_panels import PANELS, demo_snapshot
 import edhud_cargo
+import edhud_curve
 from edhud_state import COMMODITY_NAMES, HudState, load_commodity_names
 
 log = logging.getLogger("EDMarketConnector.EDHud")
@@ -27,7 +28,11 @@ TICK_MS = 500
 TOPMOST_REASSERT_S = 3.0
 DEFAULTS = {"enabled": 1, "font_size": 11, "opacity": 88, "text_opacity": 100, "locked": 1,
             "cargo_combined": 1,     # 1 = cargo sits under the missions panel, 0 = its own window
-            "cargo_bar": 1}          # 1 = proportional bar, 0 = itemised list
+            "cargo_bar": 1,          # 1 = proportional bar, 0 = itemised list
+            "curve": 0,              # 1 = cockpit curvature: panels angled + slightly soft like the in-game screens
+            "curve_strength": 50,    # 0-100, how far the panel is turned
+            "curve_soft": 40,        # 0-100, depth-of-field softness towards the far edge
+            "curve_side": 1}         # 1 = panels sit on the right of the view, 0 = on the left (no UI yet)
 
 
 class Settings:
@@ -124,6 +129,20 @@ class Controller:
         self.master.after(100, self._poll_hotkey)
         return frame
 
+    def _curve_params(self):
+        """CurveParams for the overlay windows, or None when the effect is off / Pillow is unavailable."""
+        if not self.settings.get("curve") or not edhud_curve.available():
+            return None
+        try:
+            screen_w = int(self.master.winfo_screenwidth())
+        except Exception:
+            screen_w = 1920
+        return edhud_curve.CurveParams(
+            strength=max(0, min(100, self.settings.get("curve_strength"))),
+            soft=max(0, min(100, self.settings.get("curve_soft"))),
+            side=1 if self.settings.get("curve_side") else -1,
+            screen_w=screen_w)
+
     def _create_windows(self):
         n = load_theme(os.path.join(self.plugin_dir, "edhud_theme.json"))
         if n:
@@ -137,6 +156,7 @@ class Controller:
                     opacity=self.settings.get("opacity") / 100.0,
                     text_opacity=self.settings.get("text_opacity") / 100.0,
                     locked=bool(self.settings.get("locked")),
+                    curve=self._curve_params(),
                 )
             except Exception:
                 log.exception("could not create overlay window %s", p["id"])
@@ -317,6 +337,9 @@ class Controller:
             "text_opacity": tk.IntVar(value=self.settings.get("text_opacity")),
             "cargo_combined": tk.IntVar(value=self.settings.get("cargo_combined")),
             "cargo_bar": tk.IntVar(value=self.settings.get("cargo_bar")),
+            "curve": tk.IntVar(value=self.settings.get("curve")),
+            "curve_strength": tk.IntVar(value=self.settings.get("curve_strength")),
+            "curve_soft": tk.IntVar(value=self.settings.get("curve_soft")),
             "hotkey": tk.StringVar(value=normalise(self.settings.get_str("hotkey", ""))),
         }
         for p in PANELS:
@@ -359,13 +382,25 @@ class Controller:
         ttk.Spinbox(frame, from_=30, to=100, increment=5, width=5, textvariable=v["text_opacity"]).grid(row=r, column=1, sticky="w")
         nb.Label(frame, text="(separate from window opacity on Windows)").grid(row=r, column=2, sticky="w", padx=(6, 0))
         r += 1
+        have_pil = edhud_curve.available()
+        nb.Checkbutton(frame, text="Cockpit curvature: angle the panels like the in-game cockpit screens (slightly soft)"
+                       if have_pil else "Cockpit curvature (unavailable: Pillow not found)",
+                       variable=v["curve"], command=self.apply_prefs,
+                       state="normal" if have_pil else "disabled").grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        r += 1
+        nb.Label(frame, text="   Curve strength %").grid(row=r, column=0, sticky="w")
+        ttk.Spinbox(frame, from_=0, to=100, increment=5, width=5, textvariable=v["curve_strength"]).grid(row=r, column=1, sticky="w")
+        r += 1
+        nb.Label(frame, text="   Softness (depth of field) %").grid(row=r, column=0, sticky="w")
+        ttk.Spinbox(frame, from_=0, to=100, increment=5, width=5, textvariable=v["curve_soft"]).grid(row=r, column=1, sticky="w")
+        r += 1
         nb.Checkbutton(frame, text="Lock position (click-through). Untick to drag panels with the mouse.",
                        variable=v["locked"], command=self._lock_toggled).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         r += 1
         nb.Button(frame, text="Show 15 s demo", command=lambda: self.demo(15)).grid(row=r, column=0, sticky="w", pady=(10, 0))
         nb.Button(frame, text="Reset positions", command=self.reset_positions).grid(row=r, column=1, sticky="w", pady=(10, 0))
         r += 1
-        for name in ("font_size", "opacity", "text_opacity"):
+        for name in ("font_size", "opacity", "text_opacity", "curve_strength", "curve_soft"):
             v[name].trace_add("write", lambda *a: self._live())      # spinboxes apply as you change them
         nb.Label(frame, text="Tip: the game must be in Borderless or Windowed mode for overlays to appear over it.").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
@@ -380,6 +415,12 @@ class Controller:
         self.settings.set("locked", v["locked"].get())
         self.settings.set("cargo_combined", v["cargo_combined"].get())
         self.settings.set("cargo_bar", v["cargo_bar"].get())
+        self.settings.set("curve", v["curve"].get())
+        try:
+            self.settings.set("curve_strength", max(0, min(100, int(v["curve_strength"].get()))))
+            self.settings.set("curve_soft", max(0, min(100, int(v["curve_soft"].get()))))
+        except (tk.TclError, ValueError):
+            pass
         try:
             self.settings.set("font_size", max(8, min(28, int(v["font_size"].get()))))
             self.settings.set("opacity", max(20, min(100, int(v["opacity"].get()))))
@@ -393,6 +434,7 @@ class Controller:
             win.set_opacity(self.settings.get("opacity") / 100.0)
             win.set_text_opacity(self.settings.get("text_opacity") / 100.0)
             win.set_locked(bool(self.settings.get("locked")))
+            win.set_curve(self._curve_params())
         if hasattr(self, "toggle_var"):
             self.toggle_var.set(self.settings.get("enabled"))
         self._last_version = None

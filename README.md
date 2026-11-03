@@ -83,6 +83,10 @@ window, position, on/off setting and drag support. Examples: fuel/jump range, ro
   credited; missions from different factions each count the kill. Kills made while EDMC was not running, in a journal
   file older than the current one, or by wing-mates are not seen. Treat the count as a guide; the mission board in
   game is authoritative.
+* Cockpit curvature redraws the panel as a picture, so text is a touch softer than the flat panel's native text (by design,
+  and more so at high Softness). Like click-through, the colour-keyed window part was verified on Linux and with a stubbed
+  Windows API, not on a real Windows + Elite install - if the panel shows a dark box or fringe around the warped shape, turn
+  the effect off and report it.
 * Overlay window styling for click-through/no-focus-steal uses Windows APIs; on Linux/Mac the panels display but are not click-through.
 * Everything was tested inside a real EDMC run on Linux (virtual display, simulated journals). The Windows-only part (click-through / no focus steal) was verified with a stubbed Windows API, not on a real Windows + Elite install - if panels steal focus or block mouse clicks on your machine, report it.
 
@@ -93,4 +97,9 @@ Everything below applies immediately, no need to press OK.
 - **Cargo display** - proportional capacity bar (names above it, one colour per commodity) or an itemised list.
 - **Window opacity / Text opacity** - background and text fade separately (two stacked windows on Windows).
 - **Lock position** - untick to drag panels; your real data stays on screen. Only "Show 15 s demo" shows test data.
+- **Cockpit curvature** (off by default) - angles the panels like the in-game cockpit screens instead of a flat sheet:
+  turned about the vertical axis in perspective (nearer edge taller) plus a very slight depth-of-field softness that grows
+  towards the far edge. *Curve strength %* (50 = 14 degrees, 100 = 28) and *Softness %* (0 = crisp) apply live. Written for
+  panels on the right of the view (a left-hand mirror exists internally but has no setting yet). Needs Pillow
+  (bundled with EDMC). Dragging, click-through and the opacity settings work as before.
 - Colours: `edhud_theme.json` (see the file). `"commodity_colors": {"gold": "#ffcc00"}` recolours cargo-bar items.

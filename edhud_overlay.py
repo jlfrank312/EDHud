@@ -15,6 +15,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 import edhud_cargo
+import edhud_curve
 
 log = logging.getLogger("EDMarketConnector.EDHud.overlay")
 
@@ -103,7 +104,7 @@ class OverlayWindow:
     """
 
     def __init__(self, master, panel_id, x, y, on_moved=None, font_family=None, font_size=11,
-                 opacity=0.85, text_opacity=1.0, locked=True, dual=None):
+                 opacity=0.85, text_opacity=1.0, locked=True, dual=None, curve=None):
         self.master = master
         self.panel_id = panel_id
         self.x, self.y = int(x), int(y)
@@ -114,6 +115,17 @@ class OverlayWindow:
         self._drag = None
         self._cur_lines = []
         self.dual = (sys.platform == "win32") if dual is None else bool(dual)
+        # cockpit-curvature effect (edhud_curve): CurveParams or None = flat panel
+        self.curve = curve
+        self._curved = False            # what is on screen right now
+        self._curve_failed = False      # latched if the effect ever errors: stay flat rather than retry every tick
+        self._photos = []               # Tk keeps no reference to PhotoImages
+        self._origin = (0, 0)           # window top-left relative to (x, y); non-zero when the warped panel overhangs
+        self._twin_inset = 1            # text window offset inside the background window (1px frame when flat)
+        self._pil_cache = None
+        self._frame_cache = None        # (key, warped frame picture) for the background window
+        self._applied_key = ""          # transparency key currently set on the background window ("" = none)
+        self.debug_layers = None        # (geometry, {name: PIL image}) of the last curved draw - for tests/previews
 
         self.win = tk.Toplevel(master)
         self.win.withdraw()
@@ -163,6 +175,35 @@ class OverlayWindow:
         self.font_bold = tkfont.Font(root=self.master, family=self._font_family, size=int(size), weight="bold")
         self.line_h = self.font.metrics("linespace") + 3
         self._bar_w = self.font.measure("0") * 8
+        self._pil_cache = None
+
+    def set_curve(self, params):
+        """Turn the cockpit-curvature effect on (CurveParams) or off (None). Takes effect on the next draw."""
+        if params != self.curve:
+            self.curve = params
+            self._curve_failed = False
+            self._last_key = None
+
+    def _curve_ready(self):
+        """CurveParams to draw with, or None when the panel should be flat."""
+        if self.curve is None or self._curve_failed or not edhud_curve.available():
+            return None
+        return self.curve
+
+    def _pil_fonts(self):
+        """Pillow twins of the two Tk fonts (matched on character width), or None if no font file can be found."""
+        key = (self._font_family, self.font.cget("size"))
+        if self._pil_cache is None or self._pil_cache[0] != key:
+            S = edhud_curve.SUPERSAMPLE
+            fonts = {}
+            for tkf, bold in ((self.font, False), (self.font_bold, True)):
+                pf = edhud_curve.load_font(self._font_family, bold, tkf.measure("0"), S)
+                if pf is None:
+                    fonts = None
+                    break
+                fonts[id(tkf)] = pf
+            self._pil_cache = (key, fonts)
+        return self._pil_cache[1]
 
     def set_font(self, family, size):
         self._font_family = pick_font_family(self.master, family)
@@ -272,7 +313,7 @@ class OverlayWindow:
         if not lines:
             self.hide()
             return
-        key = (repr(lines), self.locked, self._font_family, self.font.cget("size"))
+        key = (repr(lines), self.locked, self._font_family, self.font.cget("size"), self.curve)
         if key == self._last_key and self.visible:
             return
         self._last_key = key
@@ -306,7 +347,24 @@ class OverlayWindow:
         return self._seg_width(ln["left"], bold=is_bold(i, ln)), self._seg_width(ln["right"])
 
     def _redraw(self, lines):
-        c = self.canvas
+        if self._curve_ready():
+            fonts = self._pil_fonts()
+            if fonts:
+                try:
+                    pc = edhud_curve.PilCanvas(fonts)
+                    total_w, total_h = self._draw_panel(lines, pc)
+                    self._present_curved(pc, total_w, total_h)
+                    return
+                except Exception:
+                    log.exception("cockpit curvature failed; showing the flat panel instead")
+            else:
+                log.warning("cockpit curvature needs a TrueType monospace font Pillow can find; showing the flat panel")
+            self._curve_failed = True
+        total_w, total_h = self._draw_panel(lines, self.canvas)
+        self._present_flat(total_w, total_h)
+
+    def _draw_panel(self, lines, c):
+        """Lay out and draw `lines` on `c` (the Tk canvas, or a PilCanvas for the curved path). Returns (w, h)."""
         c.delete("all")
         gap = self.font.measure("    ")
         pad_g = PAD // 2 + 2                    # padding either side of a divider that gets its own breathing room
@@ -352,12 +410,88 @@ class OverlayWindow:
                 y += pad_g + 1
         if hint:
             c.create_text(PAD, y, anchor="nw", text="drag to move", font=self.font, fill=COLORS["accent"])
+        return total_w, total_h
 
-        c.configure(width=total_w, height=total_h)
-        if self.bgcanvas is not c:
+    # -- presenting the drawn panel -----------------------------------------------------------------------
+    def _set_window_mode(self, curved):
+        """Switch the background window between 'flat box with a frame' and 'colour-keyed picture of the warped panel'."""
+        changed = curved != self._curved
+        self._curved = curved
+        self._twin_inset = 0 if curved else 1
+        self.bgcanvas.configure(highlightthickness=0 if curved else 1)
+        if self.dual:
+            key = self._bg_key_hex if curved else ""
+            if key != self._applied_key:
+                self._applied_key = key
+                try:
+                    self.win.attributes("-transparentcolor", key)
+                except tk.TclError:
+                    pass
+                changed = True
+        if changed:
+            self._apply_platform_style()
+
+    def _present_flat(self, total_w, total_h):
+        self._set_window_mode(False)
+        self._origin = (0, 0)
+        if self.bgcanvas is not self.canvas:
+            self.bgcanvas.delete("all")          # drop a curved picture left from before
+        self.bgcanvas.configure(bg=COLORS["bg"])
+        self.win.configure(bg=COLORS["bg"])
+        self.canvas.configure(width=total_w, height=total_h)
+        if self.bgcanvas is not self.canvas:
             self.bgcanvas.configure(width=total_w, height=total_h)
         self._size = (total_w + 2, total_h + 2)   # + highlight border of the background window
         self._inner = (total_w, total_h)
+        self._photos = []
+        self._place()
+
+    def _curved_images(self, pc, total_w, total_h):
+        """Warped, softened pictures for the current look: (geometry, {"bg": img, "text": img}) or {"all": img}."""
+        S = edhud_curve.SUPERSAMPLE
+        W, H = total_w + 2, total_h + 2                 # flat size including the 1px frame
+        geom = edhud_curve.geometry(W, H, self.curve)
+        bg = edhud_curve.hex_rgb(COLORS["bg"])
+        border_hex = COLORS["border"] if self.locked else BORDER_UNLOCKED
+        border = edhud_curve.hex_rgb(border_hex)
+        if self.dual:
+            self._bg_key = edhud_curve.pick_key(bg, border)
+            # the frame picture depends only on size/colours/settings, so it is reused while the content changes
+            fkey = (W, H, bg, border, self.curve, self._bg_key)
+            if self._frame_cache is None or self._frame_cache[0] != fkey:
+                frame = pc.rasterize(W, H, bg, S, border=border, content=False)
+                self._frame_cache = (fkey, edhud_curve.warp(frame, geom, self.curve, self._bg_key))
+            text = pc.rasterize(W, H, bg, S)
+            layers = {"bg": self._frame_cache[1], "text": edhud_curve.warp(text, geom, self.curve, bg)}
+        else:
+            whole = pc.rasterize(W, H, bg, S, border=border)
+            layers = {"all": edhud_curve.warp(whole, geom, self.curve, bg)}
+        return geom, layers
+
+    @property
+    def _bg_key_hex(self):
+        return "#%02x%02x%02x" % getattr(self, "_bg_key", (1, 1, 1))
+
+    def _present_curved(self, pc, total_w, total_h):
+        geom, layers = self._curved_images(pc, total_w, total_h)
+        self.debug_layers = (geom, layers)
+        self._set_window_mode(True)
+        bw, bh = geom.size
+        photos = []
+        targets = {"bg": self.bgcanvas, "text": self.canvas} if self.dual else {"all": self.bgcanvas}
+        for name, cv in targets.items():
+            photo = tk.PhotoImage(master=self.master, data=edhud_curve.ppm_bytes(layers[name]))
+            photos.append(photo)
+            cv.delete("all")
+            cv.configure(width=bw, height=bh, highlightthickness=0,
+                         bg=(self._bg_key_hex if (self.dual and name == "bg") else COLORS["bg"]))
+            cv.create_image(0, 0, anchor="nw", image=photo)
+        if self.dual:
+            self.win.configure(bg=self._bg_key_hex)
+        self._photos = photos
+        self._size = (bw, bh)
+        self._inner = (bw, bh)
+        self._origin = geom.offset
         self._place()
 
     def _draw_cbar(self, c, spec, y, total_w):
@@ -433,10 +567,12 @@ class OverlayWindow:
 
     def _place(self):
         w, h = getattr(self, "_size", (MIN_WIDTH, 60))
-        self.win.geometry(f"{w}x{h}+{self.x}+{self.y}")
+        ox, oy = self._origin
+        self.win.geometry(f"{w}x{h}+{self.x + ox}+{self.y + oy}")
         if self.twin is not None:
             iw, ih = getattr(self, "_inner", (w - 2, h - 2))
-            self.twin.geometry(f"{iw}x{ih}+{self.x + 1}+{self.y + 1}")   # inside the background window's 1px border
+            k = self._twin_inset      # flat: inside the background window's 1px border; curved: same box exactly
+            self.twin.geometry(f"{iw}x{ih}+{self.x + ox + k}+{self.y + oy + k}")
 
     def show(self):
         if not self.visible:
