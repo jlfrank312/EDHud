@@ -56,7 +56,22 @@ def _bar(done, total):
 # ----------------------------------------------------------------------------
 # Cargo panel
 # ----------------------------------------------------------------------------
+def cargo_bar_line(snap, combined=False):
+    """One row: CARGO [--GOLD 42 TONS--][--SILVER 8--]        50/100 tons full (segments sized by share of capacity)."""
+    items = sorted((i for i in snap["cargo_items"] if i["count"] > 0), key=lambda i: (-i["count"], i["name"]))
+    spec = {"label": "CARGO", "total": snap["cargo_total"], "capacity": snap.get("capacity"),
+            "items": [(i["name"], i["count"], i["mission_id"] is not None, i.get("key", "")) for i in items]}
+    return {"left": [], "right": [], "cbar": spec, "rule_above": bool(combined)}
+
+
 def render_cargo(snap, opts):
+    """
+    opts: cargo_style 'bar' (default) | 'list'; combined=True when appended under the missions panel
+    (then the section gets its own divider above it instead of acting as the window's title row).
+    """
+    combined = bool(opts.get("combined"))
+    if opts.get("cargo_style", "bar") == "bar":
+        return [cargo_bar_line(snap, combined)]
     items = snap["cargo_items"]
     total, cap = snap["cargo_total"], snap.get("capacity")
     if cap:
@@ -64,7 +79,8 @@ def render_cargo(snap, opts):
         head_right = [(f"{total}/{cap} t", style)]
     else:
         head_right = [(f"{total} t", "text")]
-    lines = [_line([("CARGO", "title")], head_right)]
+    flags = {"bold": True, "rule": True, "rule_above": True} if combined else {}
+    lines = [_line([("CARGO", "title")], head_right, **flags)]
     if not items:
         lines.append(_line([("Hold empty", "dim")]))
         return lines

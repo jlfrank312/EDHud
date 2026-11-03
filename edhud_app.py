@@ -8,21 +8,26 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk
 
+from edhud_hotkey import HotkeyListener, combo_from_event, normalise
 from edhud_overlay import OverlayWindow, load_theme
 from edhud_panels import PANELS, demo_snapshot
-from edhud_state import HudState, load_commodity_names
+import edhud_cargo
+from edhud_state import COMMODITY_NAMES, HudState, load_commodity_names
 
 log = logging.getLogger("EDMarketConnector.EDHud")
 
 UNSET = -99999
 TICK_MS = 500
 TOPMOST_REASSERT_S = 3.0
-DEFAULTS = {"enabled": 1, "font_size": 11, "opacity": 88, "locked": 1}
+DEFAULTS = {"enabled": 1, "font_size": 11, "opacity": 88, "text_opacity": 100, "locked": 1,
+            "cargo_combined": 1,     # 1 = cargo sits under the missions panel, 0 = its own window
+            "cargo_bar": 1}          # 1 = proportional bar, 0 = itemised list
 
 
 class Settings:
@@ -37,6 +42,15 @@ class Settings:
 
     def set(self, key, value):
         self.config.set(f"edhud_{key}", int(value))
+
+    def get_str(self, key, default=""):
+        try:
+            return self.config.get_str(f"edhud_{key}", default=default) or default
+        except Exception:
+            return default
+
+    def set_str(self, key, value):
+        self.config.set(f"edhud_{key}", str(value))
 
     def pos(self, panel):
         x = self.config.get_int(f"edhud_{panel['id']}_x", default=UNSET)
@@ -67,6 +81,10 @@ class Controller:
         self._tick_id = None
         self._journal_dir = None
         self._pref_vars = {}
+        self._prefs_top = None
+        self._hotkey_q = queue.SimpleQueue()
+        self.hotkey = HotkeyListener(lambda: self._hotkey_q.put(1))
+        self._hotkey_status = None
 
     # ------------------------------------------------------------------
     # EDMC callbacks
@@ -102,6 +120,8 @@ class Controller:
         self._create_windows()
         self.master.after(1500, self._start_replay)    # let EDMC finish starting its journal monitor
         self._schedule_tick()
+        self._apply_hotkey()
+        self.master.after(100, self._poll_hotkey)
         return frame
 
     def _create_windows(self):
@@ -115,10 +135,43 @@ class Controller:
                     self.master, p["id"], x, y, on_moved=self._window_moved,
                     font_size=self.settings.get("font_size"),
                     opacity=self.settings.get("opacity") / 100.0,
+                    text_opacity=self.settings.get("text_opacity") / 100.0,
                     locked=bool(self.settings.get("locked")),
                 )
             except Exception:
                 log.exception("could not create overlay window %s", p["id"])
+
+    # -- global hotkey: toggles the overlay ---------------------------------
+    def _apply_hotkey(self):
+        combo = normalise(self.settings.get_str("hotkey", ""))
+        ok = self.hotkey.start(combo) if combo else (self.hotkey.stop() or False)
+        if combo and not ok:
+            log.warning("overlay hotkey %s not active: %s", combo, self.hotkey.error)
+        return combo, ok
+
+    def _poll_hotkey(self):
+        if self._stopping:
+            return
+        pressed = False
+        try:
+            while True:
+                self._hotkey_q.get_nowait()
+                pressed = not pressed            # two presses between polls cancel out
+        except queue.Empty:
+            pass
+        if pressed:
+            self.toggle_overlay()
+        self.master.after(100, self._poll_hotkey)
+
+    def toggle_overlay(self):
+        on = not bool(self.settings.get("enabled"))
+        self.settings.set("enabled", int(on))
+        if hasattr(self, "toggle_var"):
+            self.toggle_var.set(int(on))
+        if not on:
+            self._demo_until = 0.0
+        self._last_version = None
+        self._refresh()
 
     def _window_moved(self, panel_id, x, y):
         self.settings.config.set(f"edhud_{panel_id}_x", int(x))
@@ -144,6 +197,7 @@ class Controller:
                         path = os.path.join(str(base), *rel)
                         if os.path.isfile(path):
                             n = load_commodity_names(path)
+                            edhud_cargo.set_known_names(COMMODITY_NAMES.values())
                             log.info("loaded %d commodity names from %s", n, path)
                             return
             log.info("no commodity name table found; using journal names only")
@@ -202,14 +256,22 @@ class Controller:
         stamp = (snap["version"], int(time.time() // 20), demo, enabled)
         if stamp != self._last_version:
             self._last_version = stamp
-            opts = {}
+            opts = {"cargo_style": "bar" if self.settings.get("cargo_bar") else "list"}
+            by_id = {p["id"]: p for p in PANELS}
+            show = {p["id"]: (enabled or demo) and self.settings.panel_on(p) and self._game_ok(demo) for p in PANELS}
+            combined = bool(self.settings.get("cargo_combined")) and show.get("missions") and show.get("cargo")
             for p in PANELS:
                 win = self.windows.get(p["id"])
                 if not win:
                     continue
-                if (enabled or demo) and self.settings.panel_on(p) and self._game_ok(demo):
+                if combined and p["id"] == "cargo":
+                    win.hide()                       # its content is appended to the missions panel
+                elif show[p["id"]]:
                     try:
-                        win.set_lines(p["render"](snap, opts))
+                        lines = p["render"](snap, opts)
+                        if combined and p["id"] == "missions":
+                            lines = lines + by_id["cargo"]["render"](snap, dict(opts, combined=True))
+                        win.set_lines(lines)
                     except Exception:
                         log.exception("render failed for %s", p["id"])
                 else:
@@ -243,11 +305,19 @@ class Controller:
     # ------------------------------------------------------------------
     def build_prefs(self, parent, nb):
         frame = nb.Frame(parent)
+        try:
+            self._prefs_top = parent.winfo_toplevel()
+        except Exception:
+            self._prefs_top = None
         v = self._pref_vars = {
             "enabled": tk.IntVar(value=self.settings.get("enabled")),
             "locked": tk.IntVar(value=self.settings.get("locked")),
             "font_size": tk.IntVar(value=self.settings.get("font_size")),
             "opacity": tk.IntVar(value=self.settings.get("opacity")),
+            "text_opacity": tk.IntVar(value=self.settings.get("text_opacity")),
+            "cargo_combined": tk.IntVar(value=self.settings.get("cargo_combined")),
+            "cargo_bar": tk.IntVar(value=self.settings.get("cargo_bar")),
+            "hotkey": tk.StringVar(value=normalise(self.settings.get_str("hotkey", ""))),
         }
         for p in PANELS:
             v[f"{p['id']}_on"] = tk.IntVar(value=1 if self.settings.panel_on(p) else 0)
@@ -255,24 +325,48 @@ class Controller:
         r = 0
         nb.Label(frame, text="ED HUD - on-screen cargo & missions").grid(row=r, column=0, columnspan=3, sticky="w", pady=(6, 2))
         r += 1
-        nb.Checkbutton(frame, text="Show overlay", variable=v["enabled"]).grid(row=r, column=0, columnspan=3, sticky="w")
+        nb.Checkbutton(frame, text="Show overlay", variable=v["enabled"], command=self.apply_prefs).grid(
+            row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        nb.Label(frame, text="Overlay on/off hotkey").grid(row=r, column=0, sticky="w")
+        hk = ttk.Entry(frame, textvariable=v["hotkey"], width=18)
+        hk.grid(row=r, column=1, sticky="w")
+        hk.bind("<KeyPress>", self._hotkey_keypress)
+        nb.Button(frame, text="Clear", command=lambda: (v["hotkey"].set(""), self.apply_prefs())).grid(
+            row=r, column=2, sticky="w", padx=(6, 0))
+        r += 1
+        self._hotkey_status = nb.Label(frame, text="Click the box, then press the combination (e.g. Ctrl+Alt+H).")
+        self._hotkey_status.grid(row=r, column=0, columnspan=3, sticky="w")
         r += 1
         for p in PANELS:
-            nb.Checkbutton(frame, text=f"  {p['label']} panel", variable=v[f"{p['id']}_on"]).grid(
+            nb.Checkbutton(frame, text=f"  {p['label']} panel", variable=v[f"{p['id']}_on"], command=self.apply_prefs).grid(
                 row=r, column=0, columnspan=3, sticky="w")
             r += 1
+        nb.Checkbutton(frame, text="Combine Cargo with the Missions panel (one window)",
+                       variable=v["cargo_combined"], command=self.apply_prefs).grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        nb.Label(frame, text="Cargo display").grid(row=r, column=0, sticky="w")
+        nb.Radiobutton(frame, text="Capacity bar", variable=v["cargo_bar"], value=1, command=self.apply_prefs).grid(row=r, column=1, sticky="w")
+        nb.Radiobutton(frame, text="Itemised list", variable=v["cargo_bar"], value=0, command=self.apply_prefs).grid(row=r, column=2, sticky="w")
+        r += 1
         nb.Label(frame, text="Font size").grid(row=r, column=0, sticky="w", pady=(8, 0))
         ttk.Spinbox(frame, from_=8, to=28, width=5, textvariable=v["font_size"]).grid(row=r, column=1, sticky="w", pady=(8, 0))
         r += 1
-        nb.Label(frame, text="Opacity %").grid(row=r, column=0, sticky="w")
-        ttk.Spinbox(frame, from_=30, to=100, increment=5, width=5, textvariable=v["opacity"]).grid(row=r, column=1, sticky="w")
+        nb.Label(frame, text="Window opacity %").grid(row=r, column=0, sticky="w")
+        ttk.Spinbox(frame, from_=20, to=100, increment=5, width=5, textvariable=v["opacity"]).grid(row=r, column=1, sticky="w")
+        r += 1
+        nb.Label(frame, text="Text opacity %").grid(row=r, column=0, sticky="w")
+        ttk.Spinbox(frame, from_=30, to=100, increment=5, width=5, textvariable=v["text_opacity"]).grid(row=r, column=1, sticky="w")
+        nb.Label(frame, text="(separate from window opacity on Windows)").grid(row=r, column=2, sticky="w", padx=(6, 0))
         r += 1
         nb.Checkbutton(frame, text="Lock position (click-through). Untick to drag panels with the mouse.",
-                       variable=v["locked"]).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+                       variable=v["locked"], command=self._lock_toggled).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         r += 1
         nb.Button(frame, text="Show 15 s demo", command=lambda: self.demo(15)).grid(row=r, column=0, sticky="w", pady=(10, 0))
         nb.Button(frame, text="Reset positions", command=self.reset_positions).grid(row=r, column=1, sticky="w", pady=(10, 0))
         r += 1
+        for name in ("font_size", "opacity", "text_opacity"):
+            v[name].trace_add("write", lambda *a: self._live())      # spinboxes apply as you change them
         nb.Label(frame, text="Tip: the game must be in Borderless or Windowed mode for overlays to appear over it.").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return frame
@@ -284,9 +378,12 @@ class Controller:
         v = self._pref_vars
         self.settings.set("enabled", v["enabled"].get())
         self.settings.set("locked", v["locked"].get())
+        self.settings.set("cargo_combined", v["cargo_combined"].get())
+        self.settings.set("cargo_bar", v["cargo_bar"].get())
         try:
             self.settings.set("font_size", max(8, min(28, int(v["font_size"].get()))))
-            self.settings.set("opacity", max(30, min(100, int(v["opacity"].get()))))
+            self.settings.set("opacity", max(20, min(100, int(v["opacity"].get()))))
+            self.settings.set("text_opacity", max(30, min(100, int(v["text_opacity"].get()))))
         except (tk.TclError, ValueError):
             pass
         for p in PANELS:
@@ -294,13 +391,52 @@ class Controller:
         for win in self.windows.values():
             win.set_font(None, self.settings.get("font_size"))
             win.set_opacity(self.settings.get("opacity") / 100.0)
+            win.set_text_opacity(self.settings.get("text_opacity") / 100.0)
             win.set_locked(bool(self.settings.get("locked")))
         if hasattr(self, "toggle_var"):
             self.toggle_var.set(self.settings.get("enabled"))
         self._last_version = None
-        if not self.settings.get("locked"):
-            self.demo(60)     # show something to drag around
         self._refresh()
+        if "hotkey" in v:
+            self.settings.set_str("hotkey", normalise(v["hotkey"].get()))
+            combo, ok = self._apply_hotkey()
+            if self._hotkey_status is not None:
+                try:
+                    self._hotkey_status.configure(text=(
+                        f"Hotkey {combo} is active." if combo and ok else
+                        f"Hotkey {combo} is not active: {self.hotkey.error}." if combo else
+                        "Click the box, then press the combination (e.g. Ctrl+Alt+H). Backspace clears."))
+                except tk.TclError:
+                    pass
+
+    def _live(self):
+        try:
+            self.apply_prefs()
+        except Exception:
+            log.exception("live settings update failed")
+
+    def _lock_toggled(self):
+        """Unlocking must work immediately: EDMC's settings dialog holds a modal grab that would swallow drags."""
+        self.apply_prefs()
+        top = self._prefs_top
+        if top is not None:
+            try:
+                if self._pref_vars["locked"].get():
+                    top.grab_set()
+                else:
+                    top.grab_release()
+            except tk.TclError:
+                pass
+
+    def _hotkey_keypress(self, ev):
+        if ev.keysym in ("BackSpace", "Delete") and not (ev.state & 0x5):
+            self._pref_vars["hotkey"].set("")
+        else:
+            combo = combo_from_event(ev.keysym, ev.state)
+            if combo:
+                self._pref_vars["hotkey"].set(combo)
+        self.apply_prefs()
+        return "break"
 
     def demo(self, seconds):
         self._demo_until = time.time() + seconds
@@ -324,6 +460,10 @@ class Controller:
         except Exception:
             pass
         self.state.flush(force=True)
+        try:
+            self.hotkey.stop()
+        except Exception:
+            pass
         for win in self.windows.values():
             win.destroy()
         self.windows.clear()

@@ -14,6 +14,8 @@ import sys
 import tkinter as tk
 from tkinter import font as tkfont
 
+import edhud_cargo
+
 log = logging.getLogger("EDMarketConnector.EDHud.overlay")
 
 COLORS = {
@@ -33,6 +35,8 @@ BORDER_UNLOCKED = "#00d0ff"
 PAD = 9
 BAR_PREFIX = "bar:"      # segment text "bar:0.40" is drawn as a 40% progress bar
 MIN_WIDTH = 190
+CBAR_MIN_TRACK_CHARS = 36   # minimum width of the cargo bar track, in characters
+BAR_TRACK_FILL = "#161b22"
 FONT_CANDIDATES = ("Consolas", "Lucida Console", "DejaVu Sans Mono", "Menlo", "Courier New")
 
 # Windows extended window styles
@@ -59,11 +63,22 @@ def load_theme(path):
         log.warning("could not read theme file %s", path)
         return 0
     n = 0
+    edhud_cargo.set_overrides(data.get("commodity_colors"))     # {"gold": "#ffcc00", ...} for the cargo bar
     for key, val in data.items():
         if key in COLORS and isinstance(val, str) and len(val) == 7 and val.startswith("#"):
             COLORS[key] = val
             n += 1
     return n
+
+
+def shade(color, factor):
+    """Darken (<1) or lighten (>1) a #rrggbb colour."""
+    try:
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    except (ValueError, IndexError):
+        return color
+    f = lambda v: max(0, min(255, int(v * factor)))
+    return "#%02x%02x%02x" % (f(r), f(g), f(b))
 
 
 def pick_font_family(root, wanted=None):
@@ -78,8 +93,15 @@ def pick_font_family(root, wanted=None):
 
 
 class OverlayWindow:
+    """
+    One HUD panel. On Windows it is two stacked, click-through windows so that the background and the
+    text can have different opacity: a background window (box + border, alpha = window opacity) and a text
+    window on top (colour-keyed to the background colour, alpha = text opacity). Elsewhere - or if the
+    colour key is not supported - it is a single window where one opacity applies to everything.
+    """
+
     def __init__(self, master, panel_id, x, y, on_moved=None, font_family=None, font_size=11,
-                 opacity=0.85, locked=True):
+                 opacity=0.85, text_opacity=1.0, locked=True, dual=None):
         self.master = master
         self.panel_id = panel_id
         self.x, self.y = int(x), int(y)
@@ -88,23 +110,50 @@ class OverlayWindow:
         self.visible = False
         self._last_key = None
         self._drag = None
+        self._cur_lines = []
+        self.dual = (sys.platform == "win32") if dual is None else bool(dual)
 
         self.win = tk.Toplevel(master)
         self.win.withdraw()
         self.win.title(f"EDHud {panel_id}")
         self.win.overrideredirect(True)
         self.win.configure(bg=COLORS["bg"])
-        self.canvas = tk.Canvas(self.win, bg=COLORS["bg"], highlightthickness=1, bd=0,
-                                highlightbackground=COLORS["border"], highlightcolor=COLORS["border"])
-        self.canvas.pack()
-        self.canvas.bind("<ButtonPress-1>", self._press)
-        self.canvas.bind("<B1-Motion>", self._motion)
-        self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.bgcanvas = tk.Canvas(self.win, bg=COLORS["bg"], highlightthickness=1, bd=0,
+                                  highlightbackground=COLORS["border"], highlightcolor=COLORS["border"])
+        self.bgcanvas.pack()
+        self.twin = None
+        self.canvas = self.bgcanvas
+        if self.dual:
+            try:
+                self.twin = tk.Toplevel(master)
+                self.twin.withdraw()
+                self.twin.title(f"EDHud {panel_id} text")
+                self.twin.overrideredirect(True)
+                self.twin.configure(bg=COLORS["bg"])
+                self.twin.attributes("-transparentcolor", COLORS["bg"])
+                self.canvas = tk.Canvas(self.twin, bg=COLORS["bg"], highlightthickness=0, bd=0)
+                self.canvas.pack()
+            except tk.TclError:
+                log.info("colour-keyed text window not supported here; using one window for %s", panel_id)
+                if self.twin is not None:
+                    try:
+                        self.twin.destroy()
+                    except tk.TclError:
+                        pass
+                self.twin, self.canvas, self.dual = None, self.bgcanvas, False
+        for cv in {self.bgcanvas, self.canvas}:
+            cv.bind("<ButtonPress-1>", self._press)
+            cv.bind("<B1-Motion>", self._motion)
+            cv.bind("<ButtonRelease-1>", self._release)
 
         self._font_family = pick_font_family(master, font_family)
         self._build_fonts(font_size)
         self.set_opacity(opacity)
+        self.set_text_opacity(text_opacity)
         self._apply_platform_style()
+
+    def _windows(self):
+        return [w for w in (self.win, self.twin) if w is not None]
 
     # -- fonts / style ---------------------------------------------------
     def _build_fonts(self, size):
@@ -118,16 +167,30 @@ class OverlayWindow:
         self._build_fonts(size)
         self._last_key = None      # force redraw
 
+    @staticmethod
+    def _clamp(value, lo=0.2):
+        return max(lo, min(1.0, float(value)))
+
     def set_opacity(self, value):
+        """Window (background + border) opacity. In single-window mode this is the whole panel's opacity."""
         try:
-            self.win.attributes("-alpha", max(0.2, min(1.0, float(value))))
+            self.win.attributes("-alpha", self._clamp(value))
         except tk.TclError:
             pass
 
+    def set_text_opacity(self, value):
+        """Text opacity (only separable from the window opacity in two-window mode)."""
+        self.text_opacity = self._clamp(value, 0.3)
+        if self.twin is not None:
+            try:
+                self.twin.attributes("-alpha", self.text_opacity)
+            except tk.TclError:
+                pass
+
     def set_locked(self, locked):
         self.locked = bool(locked)
-        self.canvas.configure(highlightbackground=COLORS["border"] if self.locked else BORDER_UNLOCKED,
-                              highlightcolor=COLORS["border"] if self.locked else BORDER_UNLOCKED)
+        col = COLORS["border"] if self.locked else BORDER_UNLOCKED
+        self.bgcanvas.configure(highlightbackground=col, highlightcolor=col)
         self._apply_platform_style()
         self._last_key = None
 
@@ -137,18 +200,23 @@ class OverlayWindow:
 
     # -- platform: topmost, no focus stealing, click-through -----------------
     def _apply_platform_style(self):
-        try:
-            self.win.attributes("-topmost", True)
-        except tk.TclError:
-            pass
+        for w in self._windows():
+            try:
+                w.attributes("-topmost", True)
+            except tk.TclError:
+                pass
         if sys.platform != "win32":
             return
+        for w in self._windows():
+            self._style_windows_window(w)
+
+    def _style_windows_window(self, w):
         try:
             import ctypes
             from ctypes import wintypes
-            self.win.update_idletasks()
+            w.update_idletasks()
             user32 = ctypes.windll.user32
-            hwnd = user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
+            hwnd = user32.GetParent(w.winfo_id()) or w.winfo_id()
             get = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
             setw = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
             get.restype, get.argtypes = ctypes.c_ssize_t, [wintypes.HWND, ctypes.c_int]
@@ -167,11 +235,12 @@ class OverlayWindow:
 
     def keep_on_top(self):
         if self.visible:
-            try:
-                self.win.attributes("-topmost", True)
-                self.win.lift()
-            except tk.TclError:
-                pass
+            for w in self._windows():          # background first, text on top of it
+                try:
+                    w.attributes("-topmost", True)
+                    w.lift()
+                except tk.TclError:
+                    pass
 
     # -- drawing -----------------------------------------------------------
     def set_lines(self, lines):
@@ -183,6 +252,7 @@ class OverlayWindow:
         if key == self._last_key and self.visible:
             return
         self._last_key = key
+        self._cur_lines = lines
         self._redraw(lines)
         self.show()
 
@@ -190,51 +260,136 @@ class OverlayWindow:
         f = self.font_bold if bold else self.font
         return sum(self._bar_w if t.startswith(BAR_PREFIX) else f.measure(t) for t, _ in segs)
 
+    def _cbar_texts(self, spec):
+        label = spec.get("label", "CARGO")
+        total, cap = spec.get("total", 0), spec.get("capacity")
+        right = f"{total}/{cap} tons full" if cap else f"{total} tons"
+        style = "text"
+        if cap:
+            style = "bad" if total >= cap else ("warn" if total >= 0.9 * cap else "text")
+        return label, right, style
+
+    def _row_h(self, ln):
+        """The cargo bar row is two lines tall (names above the bar) when it has anything to label."""
+        cb = ln.get("cbar")
+        return self.line_h * (2 if cb and cb.get("items") else 1)
+
+    def _line_widths(self, ln, i, is_bold):
+        if ln.get("cbar"):
+            label, right, _ = self._cbar_texts(ln["cbar"])
+            lw = self.font_bold.measure(label + " ") + self.font.measure("0") * CBAR_MIN_TRACK_CHARS
+            return lw, self.font.measure("  " + right)
+        return self._seg_width(ln["left"], bold=is_bold(i, ln)), self._seg_width(ln["right"])
+
     def _redraw(self, lines):
         c = self.canvas
         c.delete("all")
         gap = self.font.measure("    ")
+        pad_g = PAD // 2 + 2                    # padding either side of a divider that gets its own breathing room
         width = MIN_WIDTH
-        rules = {i for i, l in enumerate(lines) if l.get("rule")} or {0}
+        rules = {i for i, l in enumerate(lines) if l.get("rule", i == 0)}
         is_bold = lambda i, l: l.get("bold", i == 0)
         for i, ln in enumerate(lines):
-            lw = self._seg_width(ln["left"], bold=is_bold(i, ln))
-            rw = self._seg_width(ln["right"])
-            width = max(width, lw + (gap if rw else 0) + rw)
+            lw, rw = self._line_widths(ln, i, is_bold)
+            width = max(width, lw + (gap if rw and not ln.get("cbar") else 0) + rw)
         total_w = width + 2 * PAD
         hint = not self.locked
-        gap = PAD // 2 + 2                      # padding either side of the line between a "box" header and the body
-        has_box = any(l.get("box") for l in lines)
-        total_h = PAD * 2 + len(lines) * self.line_h + (self.line_h if hint else 0) + ((2 * gap + 1) if has_box else 0) \
-            + (2 * gap + 1) * sum(1 for l in lines if l.get("pad"))
+        extra = sum(2 * pad_g + 1 for l in lines if l.get("box") or l.get("pad"))      # padded divider rows
+        extra += sum(pad_g * 2 for l in lines if l.get("rule_above"))                  # divider above a row
+        total_h = PAD * 2 + sum(self._row_h(l) for l in lines) + (self.line_h if hint else 0) + extra
 
         y = PAD
         for i, ln in enumerate(lines):
             x = PAD
-            for text, style in ln["left"]:
-                f = self.font_bold if (is_bold(i, ln) or style in ("head", "title")) else self.font
-                x += self._draw_seg(c, text, style, f, x, y)
-            xr = total_w - PAD - self._seg_width(ln["right"])
-            for text, style in ln["right"]:
-                xr += self._draw_seg(c, text, style, self.font, xr, y)
-            y += self.line_h
-            if i in rules and ln.get("pad"):      # padded title row: room below the text, then the divider, then room again
-                y += gap
+            if ln.get("rule_above"):
+                y += pad_g
                 c.create_line(PAD, y, total_w - PAD, y, fill=COLORS["border"])
-                y += gap + 1
+                y += pad_g
+            if ln.get("cbar"):
+                self._draw_cbar(c, ln["cbar"], y, total_w)
+            else:
+                for text, style in ln["left"]:
+                    f = self.font_bold if (is_bold(i, ln) or style in ("head", "title")) else self.font
+                    x += self._draw_seg(c, text, style, f, x, y)
+                xr = total_w - PAD - self._seg_width(ln["right"])
+                for text, style in ln["right"]:
+                    xr += self._draw_seg(c, text, style, self.font, xr, y)
+            y += self._row_h(ln)
+            if i in rules and ln.get("pad"):      # padded title row: room below the text, the divider, room again
+                y += pad_g
+                c.create_line(PAD, y, total_w - PAD, y, fill=COLORS["border"])
+                y += pad_g + 1
             elif i in rules:
                 c.create_line(PAD, y - 1, total_w - PAD, y - 1, fill=COLORS["border"])
             if ln.get("box") and not (i + 1 < len(lines) and lines[i + 1].get("box")):
                 # header drawn like its own window: full-width border line, attached to the body below it
-                y += gap
+                y += pad_g
                 c.create_line(0, y, total_w + 2, y, fill=COLORS["border"])
-                y += gap + 1
+                y += pad_g + 1
         if hint:
             c.create_text(PAD, y, anchor="nw", text="drag to move", font=self.font, fill=COLORS["accent"])
 
         c.configure(width=total_w, height=total_h)
-        self._size = (total_w + 2, total_h + 2)   # + highlight border
+        if self.bgcanvas is not c:
+            self.bgcanvas.configure(width=total_w, height=total_h)
+        self._size = (total_w + 2, total_h + 2)   # + highlight border of the background window
+        self._inner = (total_w, total_h)
         self._place()
+
+    def _draw_cbar(self, c, spec, y, total_w):
+        """
+        Two rows when there is cargo:
+            names:   Gold      Silver
+            bar:     CARGO [-- 42 --][- 8 -]                     50/100 tons full
+        Each commodity has its own colour; its name sits above its segment (shortened to fit, see
+        edhud_cargo.shorten_name). Stacks too small to label are summarised at the right of the names row.
+        """
+        items = spec.get("items", [])
+        label, right, rstyle = self._cbar_texts(spec)
+        by = y + (self.line_h if items else 0)                       # y of the bar row
+        lab_w = self.font_bold.measure(label + " ")
+        c.create_text(PAD, by, anchor="nw", text=label, font=self.font_bold, fill=COLORS["title"])
+        rw = self.font.measure("  " + right)
+        c.create_text(total_w - PAD, by, anchor="ne", text=right, font=self.font, fill=COLORS.get(rstyle, COLORS["text"]))
+        x0, x1 = PAD + lab_w, total_w - PAD - rw
+        top, bottom = by + 2, by + self.line_h - 3
+        c.create_rectangle(x0, top, x1, bottom, outline=COLORS["border"], fill=BAR_TRACK_FILL)
+        track = max(1, x1 - x0 - 2)
+        cap = spec.get("capacity") or max(1, spec.get("total", 0))
+        x = x0 + 1
+        small, label_end = [], x0
+        colors = edhud_cargo.palette_for([(it[3], it[0]) for it in items])
+        for (name, count, mission, key), fill in zip(items, colors):
+            w = max(3, int(round(track * count / cap)))
+            w = min(w, x1 - 1 - x)
+            if w <= 0:
+                small.append((name, count))
+                continue
+            c.create_rectangle(x, top + 1, x + w, bottom - 1, outline=COLORS["good"] if mission else COLORS["bg"], fill=fill)
+            if self.font.measure(str(count)) <= w - 4:               # tons inside the segment when it fits
+                c.create_text(x + w / 2, by + self.line_h / 2 - 1, text=str(count), font=self.font,
+                              fill=edhud_cargo.text_color_on(fill))
+            short = edhud_cargo.shorten_name(str(name), lambda t, w=w: self.font.measure(t) <= w - 3)
+            if short:
+                c.create_text(x + 1, y, anchor="nw", text=short, font=self.font, fill=fill)
+                label_end = max(label_end, x + 1 + self.font.measure(short))
+            else:
+                small.append((name, count))
+            x += w
+        if small:                                                    # unlabeled stacks: name them off to the right
+            # first choice: right-aligned with the bar; if the labels leave too little room there, the names row
+            # above the "x/y tons full" text is free, so let the hint extend over it
+            done = False
+            for edge in (x1, total_w - PAD):
+                room = edge - label_end - 10
+                for text in (", ".join(f"{n} {k}" for n, k in small), f"+{len(small)} small"):
+                    text = ("also " + text) if not text.startswith("+") else text
+                    if self.font.measure(text) <= room:
+                        c.create_text(edge, y, anchor="ne", text=text, font=self.font, fill=COLORS["dim"])
+                        done = True
+                        break
+                if done:
+                    break
 
     def _draw_seg(self, c, text, style, f, x, y):
         """Draw one segment at (x, y); returns its width."""
@@ -245,7 +400,7 @@ class OverlayWindow:
             except ValueError:
                 frac = 0.0
             top, bottom = y + 3, y + self.line_h - 5
-            c.create_rectangle(x, top, x + self._bar_w, bottom, outline=COLORS["border"], fill="#161b22")
+            c.create_rectangle(x, top, x + self._bar_w, bottom, outline=COLORS["border"], fill=BAR_TRACK_FILL)
             if frac > 0:
                 c.create_rectangle(x, top, x + max(2, self._bar_w * frac), bottom, outline=color, fill=color)
             return self._bar_w
@@ -255,26 +410,33 @@ class OverlayWindow:
     def _place(self):
         w, h = getattr(self, "_size", (MIN_WIDTH, 60))
         self.win.geometry(f"{w}x{h}+{self.x}+{self.y}")
+        if self.twin is not None:
+            iw, ih = getattr(self, "_inner", (w - 2, h - 2))
+            self.twin.geometry(f"{iw}x{ih}+{self.x + 1}+{self.y + 1}")   # inside the background window's 1px border
 
     def show(self):
         if not self.visible:
             self.visible = True
             self._place()
-            self.win.deiconify()
+            for w in self._windows():
+                w.deiconify()
             self._apply_platform_style()
-        self.win.lift()
+        for w in self._windows():
+            w.lift()
 
     def hide(self):
         if self.visible:
             self.visible = False
             self._last_key = None
-            self.win.withdraw()
+            for w in self._windows():
+                w.withdraw()
 
     def destroy(self):
-        try:
-            self.win.destroy()
-        except tk.TclError:
-            pass
+        for w in self._windows():
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
 
     # -- dragging (only when unlocked) ---------------------------------------
     def _press(self, ev):

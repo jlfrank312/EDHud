@@ -68,3 +68,12 @@ window, position, on/off setting and drag support. Examples: fuel/jump range, ro
 * Kill progress for massacre-type missions is not tracked (the journal does not report it reliably) – they show the target and expiry only.
 * Overlay window styling for click-through/no-focus-steal uses Windows APIs; on Linux/Mac the panels display but are not click-through.
 * Everything was tested inside a real EDMC run on Linux (virtual display, simulated journals). The Windows-only part (click-through / no focus steal) was verified with a stubbed Windows API, not on a real Windows + Elite install - if panels steal focus or block mouse clicks on your machine, report it.
+
+## Settings (File > Settings > ED HUD)
+Everything below applies immediately, no need to press OK.
+- **Overlay on/off hotkey** - click the box and press a combination (e.g. Ctrl+Alt+H); Backspace clears. Windows only.
+- **Combine Cargo with the Missions panel** - one window, or two.
+- **Cargo display** - proportional capacity bar (names above it, one colour per commodity) or an itemised list.
+- **Window opacity / Text opacity** - background and text fade separately (two stacked windows on Windows).
+- **Lock position** - untick to drag panels; your real data stays on screen. Only "Show 15 s demo" shows test data.
+- Colours: `edhud_theme.json` (see the file). `"commodity_colors": {"gold": "#ffcc00"}` recolours cargo-bar items.
