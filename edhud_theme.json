@@ -1,0 +1,10 @@
+{
+  "_comment": "Colours sampled from the user's in-game screenshot (EDHM 'XML - Color Import' look). Edit freely; any #rrggbb.",
+  "title": "#e8821e",
+  "head": "#d5d5d5",
+  "text": "#cccccc",
+  "dim": "#7f8590",
+  "accent": "#14d7e9",
+  "bg": "#08090e",
+  "border": "#0e6f7a"
+}
