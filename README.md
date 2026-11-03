@@ -107,4 +107,9 @@ Everything below applies immediately, no need to press OK.
     flat panel's corner was, so place the panel with that corner where you want it.
   * *Softness %* (0 = crisp).
   All apply live. Needs Pillow (bundled with EDMC). Dragging, click-through and the opacity settings work as before.
+- **Match colours to the active EDHM UI HUD theme** (off by default) - EDHud takes its title, text and accent colours from
+  the HUD theme EDHM UI has applied. Options: keep EDHud's own mission-state colours (default on), match the payout column
+  (default off), and the `EDHM-ini` folder (leave blank to auto-detect; set it if your game is on another drive, e.g.
+  `A:\Games\steamapps\common\Elite Dangerous\Products\elite-dangerous-odyssey-64\EDHM-ini`). Switching it off restores
+  the colours from `edhud_theme.json`.
 - Colours: `edhud_theme.json` (see the file). `"commodity_colors": {"gold": "#ffcc00"}` recolours cargo-bar items.

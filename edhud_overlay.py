@@ -29,9 +29,12 @@ COLORS = {
     "bad": "#ff5a4a",
     "accent": "#4fc3ff",
     "dest": "#ff4d4d",    # destination system/station of away-from-home missions (couriers)
+    "pay": "#4cff8f",     # mission payout column (own style so it can follow the EDHM theme separately from "good")
     "bg": "#090c11",      # window background
     "border": "#7a4a10",  # window border / divider lines
 }
+BASE_COLORS = dict(COLORS)   # the colours EDHud starts with (built-ins + edhud_theme.json): what "match theme" OFF restores
+_palette_version = 0         # bumped by apply_palette so open windows redraw even when their text did not change
 BORDER_UNLOCKED = "#00d0ff"
 PAD = 9
 BAR_PREFIX = "bar:"      # segment text "bar:0.40" is drawn as a 40% progress bar
@@ -72,6 +75,24 @@ def load_theme(path):
             COLORS[key] = val
             n += 1
     return n
+
+
+def snapshot_base():
+    """Remember the current COLORS as the base palette (call after load_theme)."""
+    BASE_COLORS.clear()
+    BASE_COLORS.update(COLORS)
+
+
+def apply_palette(palette):
+    """
+    Switch COLORS to `palette` in place (any subset of keys). `bg` is never changed: it is the text window's
+    transparent colour key. Windows pick the new colours up on their next redraw.
+    """
+    global _palette_version
+    for key, val in palette.items():
+        if key in COLORS and key != "bg" and isinstance(val, str) and len(val) == 7 and val.startswith("#"):
+            COLORS[key] = val
+    _palette_version += 1
 
 
 def shade(color, factor):
@@ -313,7 +334,7 @@ class OverlayWindow:
         if not lines:
             self.hide()
             return
-        key = (repr(lines), self.locked, self._font_family, self.font.cget("size"), self.curve)
+        key = (repr(lines), self.locked, self._font_family, self.font.cget("size"), self.curve, _palette_version)
         if key == self._last_key and self.visible:
             return
         self._last_key = key

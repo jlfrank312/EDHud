@@ -15,10 +15,11 @@ import tkinter as tk
 from tkinter import ttk
 
 from edhud_hotkey import HotkeyListener, combo_from_event, normalise
-from edhud_overlay import OverlayWindow, load_theme
+from edhud_overlay import OverlayWindow, load_theme, snapshot_base, apply_palette, BASE_COLORS
 from edhud_panels import PANELS, demo_snapshot
 import edhud_cargo
 import edhud_curve
+import edhud_edhm
 from edhud_state import COMMODITY_NAMES, HudState, load_commodity_names
 
 log = logging.getLogger("EDMarketConnector.EDHud")
@@ -33,7 +34,10 @@ DEFAULTS = {"enabled": 1, "font_size": 11, "opacity": 88, "text_opacity": 100, "
             "curve_strength": 50,    # 0-100 (stored as a magnitude; the side is curve_side), how far the panel is turned
             "curve_tilt": 30,        # 0-100, in-plane tilt about the inner-bottom corner
             "curve_soft": 40,        # 0-100, depth-of-field softness towards the far edge
-            "curve_side": 1}         # 1 = panels sit on the right of the view, 0 = on the left (negative strength in the UI)
+            "curve_side": 1,
+            "match_theme": 0,        # 1 = take the colours from the active EDHM UI HUD theme (0 = EDHud's own colours)
+            "keep_state_colors": 1,  # with match_theme: 1 = keep EDHud's own good/warn/bad/dest mission-state colours
+            "match_payout": 0}       # with match_theme: 1 = payout column follows the theme (0 = stays green)         # 1 = panels sit on the right of the view, 0 = on the left (negative strength in the UI)
 
 
 class Settings:
@@ -91,6 +95,10 @@ class Controller:
         self._hotkey_q = queue.SimpleQueue()
         self.hotkey = HotkeyListener(lambda: self._hotkey_q.put(1))
         self._hotkey_status = None
+        self._theme_stamp = None
+        self._theme_status = None
+        self._theme_status_text = "Theme matching is off."
+        self._theme_dependents = []
 
     # ------------------------------------------------------------------
     # EDMC callbacks
@@ -149,6 +157,8 @@ class Controller:
         n = load_theme(os.path.join(self.plugin_dir, "edhud_theme.json"))
         if n:
             log.info("applied %d colour overrides from edhud_theme.json", n)
+        snapshot_base()
+        self._apply_theme(force=True)
         for p in PANELS:
             x, y = self.settings.pos(p)
             try:
@@ -263,6 +273,7 @@ class Controller:
                 if jdir and os.path.isdir(jdir):
                     self.state.set_cargo_file(os.path.join(jdir, "Cargo.json"))
             self.state.poll_cargo_file()
+            self._apply_theme()                    # cheap: only rebuilds when the EDHM files or the settings changed
             self._refresh()
             self.state.flush()
         except Exception:
@@ -305,6 +316,50 @@ class Controller:
             for win in self.windows.values():
                 win.keep_on_top()
 
+    def _apply_theme(self, force=False):
+        """Rebuild the colour palette from the active EDHM theme (or restore EDHud's own colours)."""
+        st = self.settings
+        match = bool(st.get("match_theme"))
+        keep = bool(st.get("keep_state_colors"))
+        payout = bool(st.get("match_payout"))
+        ini_dir, note = (edhud_edhm.locate(st.get_str("edhm_path", "")) if match else (None, None))
+        stamp = (match, keep, payout, ini_dir, edhud_edhm.theme_stamp(ini_dir) if ini_dir else None)
+        if not force and stamp == self._theme_stamp:
+            return
+        self._theme_stamp = stamp
+        try:
+            pal, rep = edhud_edhm.build_palette(BASE_COLORS, ini_dir, match, keep, payout)
+        except Exception:
+            log.exception("EDHM theme matching failed; using EDHud's own colours")
+            pal, rep = dict(BASE_COLORS), {"error": "theme could not be read"}
+        apply_palette(pal)
+        self._last_version = None
+        self._theme_status_text = self._describe_theme(match, note, rep)
+        if self._theme_status is not None:
+            try:
+                self._theme_status.configure(text=self._theme_status_text)
+            except tk.TclError:
+                pass
+
+    @staticmethod
+    def _describe_theme(match, note, rep):
+        if not match:
+            return "Theme matching is off - EDHud uses its own colours."
+        if rep.get("error"):
+            return note or rep["error"]
+        bits = []
+        if rep.get("theme"):
+            bits.append("Matching theme: %s%s" % (rep["theme"], " by %s" % rep["author"] if rep.get("author") else ""))
+        else:
+            bits.append("Matching the active EDHM theme")
+        if note:
+            bits.append(note)
+        if rep.get("monochrome"):
+            bits.append("monochrome theme")
+        if rep.get("warnings"):
+            bits.append("; ".join(rep["warnings"]))
+        return " - ".join(bits)
+
     def _game_ok(self, demo):
         return True   # reserved for a future 'only show while Elite is running' option
 
@@ -346,6 +401,10 @@ class Controller:
             "curve_tilt": tk.IntVar(value=self.settings.get("curve_tilt")),
             "curve_soft": tk.IntVar(value=self.settings.get("curve_soft")),
             "hotkey": tk.StringVar(value=normalise(self.settings.get_str("hotkey", ""))),
+            "match_theme": tk.IntVar(value=self.settings.get("match_theme")),
+            "keep_state_colors": tk.IntVar(value=self.settings.get("keep_state_colors")),
+            "match_payout": tk.IntVar(value=self.settings.get("match_payout")),
+            "edhm_path": tk.StringVar(value=self.settings.get_str("edhm_path", "")),
         }
         for p in PANELS:
             v[f"{p['id']}_on"] = tk.IntVar(value=1 if self.settings.panel_on(p) else 0)
@@ -405,14 +464,36 @@ class Controller:
         nb.Label(frame, text="   Softness (depth of field) %").grid(row=r, column=0, sticky="w")
         ttk.Spinbox(frame, from_=0, to=100, increment=5, width=5, textvariable=v["curve_soft"]).grid(row=r, column=1, sticky="w")
         r += 1
+        nb.Checkbutton(frame, text="Match colours to the active EDHM UI HUD theme",
+                       variable=v["match_theme"], command=self.apply_prefs).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        r += 1
+        self._theme_dependents = [
+            nb.Checkbutton(frame, text="   Keep EDHud's own mission-state colours (green / amber / red)",
+                           variable=v["keep_state_colors"], command=self.apply_prefs),
+            nb.Checkbutton(frame, text="   Match the payout column to the theme (otherwise it stays green)",
+                           variable=v["match_payout"], command=self.apply_prefs),
+        ]
+        for w in self._theme_dependents:
+            w.grid(row=r, column=0, columnspan=3, sticky="w")
+            r += 1
+        nb.Label(frame, text="   EDHM-ini folder (optional)").grid(row=r, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=v["edhm_path"], width=44).grid(row=r, column=1, columnspan=2, sticky="we")
+        r += 1
+        self._theme_status = nb.Label(frame, text=self._theme_status_text)
+        self._theme_status.grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        nb.Label(frame, text="   Leave the folder blank to auto-detect (Steam/Epic default locations). Example: "
+                             "...\\Elite Dangerous\\Products\\elite-dangerous-odyssey-64\\EDHM-ini").grid(
+            row=r, column=0, columnspan=3, sticky="w")
+        r += 1
         nb.Checkbutton(frame, text="Lock position (click-through). Untick to drag panels with the mouse.",
                        variable=v["locked"], command=self._lock_toggled).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         r += 1
         nb.Button(frame, text="Show 15 s demo", command=lambda: self.demo(15)).grid(row=r, column=0, sticky="w", pady=(10, 0))
         nb.Button(frame, text="Reset positions", command=self.reset_positions).grid(row=r, column=1, sticky="w", pady=(10, 0))
         r += 1
-        for name in ("font_size", "opacity", "text_opacity", "curve_strength", "curve_tilt", "curve_soft"):
-            v[name].trace_add("write", lambda *a: self._live())      # spinboxes apply as you change them
+        for name in ("font_size", "opacity", "text_opacity", "curve_strength", "curve_tilt", "curve_soft", "edhm_path"):
+            v[name].trace_add("write", lambda *a: self._live())      # spinboxes / the path apply as you change them
         nb.Label(frame, text="Tip: the game must be in Borderless or Windowed mode for overlays to appear over it.").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
         return frame
@@ -427,6 +508,16 @@ class Controller:
         self.settings.set("cargo_combined", v["cargo_combined"].get())
         self.settings.set("cargo_bar", v["cargo_bar"].get())
         self.settings.set("curve", v["curve"].get())
+        self.settings.set("match_theme", v["match_theme"].get())
+        self.settings.set("keep_state_colors", v["keep_state_colors"].get())
+        self.settings.set("match_payout", v["match_payout"].get())
+        self.settings.set_str("edhm_path", edhud_edhm.clean_manual_path(v["edhm_path"].get()))
+        for w in self._theme_dependents:
+            try:
+                w.configure(state="normal" if v["match_theme"].get() else "disabled")
+            except tk.TclError:
+                pass
+        self._apply_theme()
         try:
             signed = max(-100, min(100, int(v["curve_strength"].get())))
             self.settings.set("curve_strength", abs(signed))

@@ -196,7 +196,7 @@ def _mission_line_compact(snap, m, pw=0, ew=0):
     if m.get("wing"):
         left.append(("  \u25b2", "accent"))      # wing mission (shareable with / shared from a wing)
     cr = _fmt_credits(m.get("reward"))
-    right = [(cr.rjust(pw) + "  ", "good"), (exp_txt.rjust(ew), exp_style)] if (pw or ew) else []
+    right = [(cr.rjust(pw) + "  ", "pay"), (exp_txt.rjust(ew), exp_style)] if (pw or ew) else []
     return _line(left, right)
 
 
