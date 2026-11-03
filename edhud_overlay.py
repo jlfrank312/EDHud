@@ -45,6 +45,8 @@ _WS_EX_TRANSPARENT = 0x00000020
 _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_LAYERED = 0x00080000
 _WS_EX_NOACTIVATE = 0x08000000
+_HWND_TOPMOST = -1
+_SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
 
 
 def load_theme(path):
@@ -210,17 +212,19 @@ class OverlayWindow:
         for w in self._windows():
             self._style_windows_window(w)
 
+    @staticmethod
+    def _hwnd_of(user32, w):
+        """Win32 handle of the Tk toplevel (Tk wraps it in a parent window; that wrapper is the real top-level)."""
+        return user32.GetParent(w.winfo_id()) or w.winfo_id()
+
     def _style_windows_window(self, w):
         try:
-            import ctypes
-            from ctypes import wintypes
+            import edhud_winapi
             w.update_idletasks()
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetParent(w.winfo_id()) or w.winfo_id()
+            user32 = edhud_winapi.apis().user32        # private handle: never touches other plugins' prototypes
+            hwnd = self._hwnd_of(user32, w)
             get = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
             setw = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
-            get.restype, get.argtypes = ctypes.c_ssize_t, [wintypes.HWND, ctypes.c_int]
-            setw.restype, setw.argtypes = ctypes.c_ssize_t, [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
             style = get(hwnd, _GWL_EXSTYLE)
             style |= _WS_EX_LAYERED | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE
             if self.locked:
@@ -229,18 +233,38 @@ class OverlayWindow:
                 style &= ~_WS_EX_TRANSPARENT         # allow dragging
             setw(hwnd, _GWL_EXSTYLE, style)
             # SWP_NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED
-            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+            user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
         except Exception:
             log.exception("could not apply Windows overlay styles")
 
+    def _raise_topmost_win32(self):
+        """
+        Re-assert topmost with one SetWindowPos(HWND_TOPMOST, NOACTIVATE) per window, background window first so
+        the text window stays above it. Avoids toggling Tk's -topmost attribute. True if every call succeeded.
+        """
+        try:
+            import edhud_winapi
+            user32 = edhud_winapi.apis().user32
+            for w in self._windows():
+                hwnd = self._hwnd_of(user32, w)
+                if not user32.SetWindowPos(hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE):
+                    return False
+            return True
+        except Exception:
+            log.debug("SetWindowPos topmost failed; falling back to Tk", exc_info=True)
+            return False
+
     def keep_on_top(self):
-        if self.visible:
-            for w in self._windows():          # background first, text on top of it
-                try:
-                    w.attributes("-topmost", True)
-                    w.lift()
-                except tk.TclError:
-                    pass
+        if not self.visible:
+            return
+        if sys.platform == "win32" and self._raise_topmost_win32():
+            return
+        for w in self._windows():          # background first, text on top of it
+            try:
+                w.attributes("-topmost", True)
+                w.lift()
+            except tk.TclError:
+                pass
 
     # -- drawing -----------------------------------------------------------
     def set_lines(self, lines):
@@ -368,7 +392,7 @@ class OverlayWindow:
             c.create_rectangle(x, top + 1, x + w, bottom - 1, outline=COLORS["good"] if mission else COLORS["bg"], fill=fill)
             if self.font.measure(str(count)) <= w - 4:               # tons inside the segment when it fits
                 c.create_text(x + w / 2, by + self.line_h / 2 - 1, text=str(count), font=self.font,
-                              fill=edhud_cargo.text_color_on(fill))
+                              fill=edhud_cargo.text_color_on(fill, avoid=COLORS["bg"]))
             short = edhud_cargo.shorten_name(str(name), lambda t, w=w: self.font.measure(t) <= w - 3)
             if short:
                 c.create_text(x + 1, y, anchor="nw", text=short, font=self.font, fill=fill)

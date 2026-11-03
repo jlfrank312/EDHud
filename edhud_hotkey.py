@@ -107,8 +107,8 @@ class HotkeyListener:
     def _apis(self):
         if self._api is not None:
             return self._api
-        import ctypes
-        return ctypes.windll
+        import edhud_winapi
+        return edhud_winapi.apis()
 
     def start(self, combo):
         """True if the hotkey is active. self.error says why not."""

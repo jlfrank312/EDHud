@@ -39,8 +39,8 @@ COMMODITY_COLORS = [
     ("textile", "#e0a4c6"), ("clothing", "#e0a4c6"), ("fabric", "#e0a4c6"), ("appliance", "#9fb4c7"),
     ("land enrichment", "#b0e060"), ("fertili", "#b0e060"), ("agronomic", "#8bd36b"), ("agri", "#8bd36b"),
     ("black box", "#e0e0e0"), ("salvage", "#c0c0c0"), ("survival", "#e0c070"), ("evacuation", "#e0c070"),
-    ("reactive", "#d98a5f"), ("armour", "#d98a5f"), ("cell", "#9fe0c0"), ("progenitor", "#9fe0c0"),
-    ("palladium", "#b39ddb"), ("diamond", "#bff0ff"), ("opal", "#8ee8e0"), ("jade", "#5fd08a"),
+    ("reactive", "#d98a5f"), ("armour", "#d98a5f"), ("cell", "#9fe0c0"),     # also covers Progenitor Cells
+    ("diamond", "#bff0ff"), ("opal", "#8ee8e0"), ("jade", "#5fd08a"),
     ("painite", "#e0507a"), ("alexandrite", "#9a7ae0"), ("benitoite", "#4a8aff"), ("musgravite", "#a05fd0"),
 ]
 _overrides: dict[str, str] = {}
@@ -154,10 +154,18 @@ def palette_for(items):
     return out
 
 
-def text_color_on(fill, dark="#06080c", light="#f4f6f8"):
-    """Readable text colour for a given fill (by luminance)."""
+def text_color_on(fill, dark="#06080c", light="#f4f6f8", avoid=None):
+    """
+    Readable text colour for a given fill (by luminance). `avoid` is the overlay's colour-key (its background
+    colour): on Windows any pixel of exactly that colour in the text window is see-through, so if the chosen
+    colour would equal it, it is nudged by one blue step (visually identical).
+    """
     r, g, b = (int(fill[i:i + 2], 16) / 255 for i in (1, 3, 5))
-    return dark if 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5 else light
+    col = dark if 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5 else light
+    if avoid and col.lower() == str(avoid).lower():
+        blue = int(col[5:7], 16)
+        col = col[:5] + "%02x" % (blue + 1 if blue < 255 else blue - 1)
+    return col
 
 
 def _cut(word, limit):

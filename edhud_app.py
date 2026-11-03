@@ -218,8 +218,8 @@ class Controller:
             try:
                 t0 = time.time()
                 self.state.replay_journal(jdir)
-                log.info("journal replay finished in %.2fs: %d missions, %d cargo stacks",
-                         time.time() - t0, len(self.state.missions), len(self.state.cargo_items))
+                nm, nc = self.state.stats()
+                log.info("journal replay finished in %.2fs: %d missions, %d cargo stacks", time.time() - t0, nm, nc)
             except Exception:
                 log.exception("journal replay failed")
 

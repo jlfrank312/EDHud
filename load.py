@@ -15,7 +15,10 @@ import sys
 
 from config import appname, config
 
-plugin_name = os.path.basename(os.path.dirname(__file__))
+# Fixed name (not the folder name): every module logs under "<appname>.EDHud", so a renamed folder cannot split them.
+# Under EDMC the handlers live on the parent "<appname>" logger and are inherited; the handler below is only a
+# fallback for running outside EDMC.
+plugin_name = "EDHud"
 logger = logging.getLogger(f"{appname}.{plugin_name}")
 if not logger.hasHandlers():
     logger.setLevel(logging.INFO)

@@ -17,6 +17,7 @@ Design notes (the reasons the previous attempt failed):
 """
 from __future__ import annotations
 
+import collections
 import glob
 import json
 import logging
@@ -124,6 +125,8 @@ LISTENED_EVENTS = {
     "Bounty", "FactionKillBond",     # kill progress for massacre missions
 }
 
+KILL_EVENTS = ("Bounty", "FactionKillBond")
+
 # events we care about when scanning older journals for mission details
 MISSION_EVENTS = {
     "MissionAccepted", "MissionRedirected", "MissionCompleted", "MissionAbandoned",
@@ -157,6 +160,16 @@ class HudState:
         self._edmc_totals_t = 0.0
         # latest Status.json (future HUD elements: fuel, pips, ...)
         self.status = {}
+        # startup replay: live events that arrive while the journal is being replayed are parked here and
+        # applied afterwards, so older replayed lines can never overwrite newer live state.
+        self._replaying = False
+        self._pending = []
+        # Kill de-duplication. Journal timestamps have 1 s resolution, so an event is identified by
+        # (timestamp, occurrence index among kill events sharing that timestamp). kill_wm is the last event
+        # already processed (persisted per commander): replaying the same lines again is then a no-op.
+        self.kill_wm = ("", 0)
+        self._kill_run_ts, self._kill_run_n = "", 0
+        self._replayed_kills = collections.Counter()      # kill lines the replay read, to spot parked live duplicates
         self._profiles = self._load_profiles()
 
     # ------------------------------------------------------------------
@@ -184,10 +197,7 @@ class HudState:
             if not force and time.time() - self._last_flush < 2.0:
                 return
             if self.cmdr:
-                self._profiles[self.cmdr] = {
-                    "missions": {str(k): v for k, v in self.missions.items()},
-                    "saved": time.time(),
-                }
+                self._profiles[self.cmdr] = self._profile_dict()
             payload = {"version": STATE_FILE_VERSION, "profiles": self._profiles}
             tmp = self.data_file + ".tmp"
             try:
@@ -199,6 +209,13 @@ class HudState:
             except Exception:
                 log.exception("could not write %s", self.data_file)
 
+    def _profile_dict(self):
+        return {
+            "missions": {str(k): v for k, v in self.missions.items()},
+            "kill_wm": list(self.kill_wm),
+            "saved": time.time(),
+        }
+
     def _touch(self):
         self.version += 1
         self._dirty = True
@@ -207,13 +224,18 @@ class HudState:
         if not cmdr or cmdr == self.cmdr:
             return
         if self.cmdr:  # stash the outgoing commander
-            self._profiles[self.cmdr] = {
-                "missions": {str(k): v for k, v in self.missions.items()},
-                "saved": time.time(),
-            }
+            self._profiles[self.cmdr] = self._profile_dict()
         self.cmdr = cmdr
         prof = self._profiles.get(cmdr, {})
         self.missions = {int(k): v for k, v in prof.get("missions", {}).items()}
+        wm = prof.get("kill_wm")
+        if isinstance(wm, (list, tuple)) and len(wm) == 2:
+            self.kill_wm = (str(wm[0]), int(wm[1]))
+        else:
+            # state saved by v0.1 (no watermark): everything up to the newest kill it had already counted is done
+            last = max((m.get("kill_ts") or "" for m in self.missions.values()), default="")
+            self.kill_wm = (last, 10 ** 9) if last else ("", 0)
+        self._kill_run_ts, self._kill_run_n = "", 0
         self._touch()
 
     # ------------------------------------------------------------------
@@ -225,6 +247,9 @@ class HudState:
         if not ev:
             return False
         with self._lock:
+            if self._replaying and not replay:
+                self._pending.append((entry, edmc_system, edmc_station))
+                return ev in CARGO_EVENTS
             try:
                 return self._handle(ev, entry, replay, edmc_system, edmc_station)
             except Exception:
@@ -307,7 +332,7 @@ class HudState:
                 if m.get("kind") in COMBAT_KINDS and m.get("kill_count"):
                     m["kills"] = m["kill_count"]          # the game redirects once the kills are done
                 self._touch()
-        elif ev in ("Bounty", "FactionKillBond"):
+        elif ev in KILL_EVENTS:
             self._kill(e)
         elif ev in ("MissionCompleted", "MissionAbandoned", "MissionFailed"):
             if self.missions.pop(e.get("MissionID"), None) is not None:
@@ -327,31 +352,51 @@ class HudState:
             "commodity": "", "commodity_name": "", "count": 0,
             "kill_count": 0, "target_faction": "", "target_type": "",
             "accepted_at": None,
-            "kills": 0, "kill_ts": "",      # kills credited so far / timestamp of the last one counted (replay-safe)
+            "kills": 0, "kill_ts": "",      # kills credited so far / timestamp of the last one counted
             "passengers": 0, "reward": 0,
             "delivered": None, "collected": None, "total": None,
         }
 
     def _kill(self, e):
         """
-        Credit a kill to every active massacre mission against that faction (the journal has no progress
-        counter). Only kills in the mission's target system, after it was accepted, count; capped at the
-        target. Events at or before the mission's last counted timestamp are ignored so a replay of the
-        same journal never double counts.
+        Credit one kill (Bounty / FactionKillBond; the journal has no progress counter) to massacre missions.
+
+        Rules:
+          * only kills of the mission's target faction, in its target system, after it was accepted, up to the target;
+          * missions from the same issuing faction do not stack in the game: a kill counts for one of them only, the
+            earliest accepted that is not yet finished. Missions from different issuing factions each count it;
+          * every kill event is identified by (timestamp, occurrence index among kill events with that same
+            timestamp), so several kills inside one second all count, and events at or before the persisted
+            watermark (already processed in an earlier pass over the same journal) are ignored.
         """
         victim, ts = e.get("VictimFaction"), str(e.get("timestamp") or "")
         if not victim:
             return
-        changed = False
+        if ts == self._kill_run_ts:
+            self._kill_run_n += 1
+        else:
+            self._kill_run_ts, self._kill_run_n = ts, 1
+        ident = (ts, self._kill_run_n)
+        if ident <= self.kill_wm:
+            return                                   # already processed
+        self.kill_wm = ident
+        self._dirty = True                           # the watermark itself must be persisted
+        when = parse_ts(ts)
+        best = {}                                    # issuing faction -> earliest accepted eligible mission
         for m in self.missions.values():
             if (m.get("kind") == "massacre" and m.get("accepted") and not m.get("redirected")
                     and m.get("target_faction") == victim and m.get("kill_count")
+                    and m.get("kills", 0) < m["kill_count"]
                     and (not m.get("dest_system") or m["dest_system"] == self.system)
-                    and ts > (m.get("kill_ts") or "") and m.get("kills", 0) < m["kill_count"]):
-                m["kills"] = m.get("kills", 0) + 1
-                m["kill_ts"] = ts
-                changed = True
-        if changed:
+                    and (when is None or m.get("accepted_at") is None or when >= m["accepted_at"])):
+                issuer = m.get("faction") or ("#%s" % m["id"])      # unknown issuer: never merge
+                order = (m.get("accepted_at") or 9e18, m["id"])
+                if issuer not in best or order < best[issuer][0]:
+                    best[issuer] = (order, m)
+        for _, m in best.values():
+            m["kills"] = m.get("kills", 0) + 1
+            m["kill_ts"] = ts
+        if best:
             self._touch()
 
     def _mission_accepted(self, e):
@@ -457,21 +502,21 @@ class HudState:
 
     def poll_cargo_file(self, force=False):
         """Reload Cargo.json if it changed on disk. Cheap (one stat call). Returns True if reloaded."""
-        path = self.cargo_file
-        if not path:
-            return False
-        try:
-            mtime = os.stat(path).st_mtime_ns
-        except OSError:
-            return False
-        if not force and mtime == self._cargo_mtime:
-            return False
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            return False  # half-written; we will retry next tick (mtime not recorded)
-        with self._lock:
+        with self._lock:          # main-thread tick, on_journal and the replay worker all call this
+            path = self.cargo_file
+            if not path:
+                return False
+            try:
+                mtime = os.stat(path).st_mtime_ns
+            except OSError:
+                return False
+            if not force and mtime == self._cargo_mtime:
+                return False
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                return False  # half-written; we will retry next tick (mtime not recorded)
             self._cargo_mtime = mtime
             if data.get("Vessel", "Ship") != "Ship":
                 return False  # SRV / fighter hold - ignore
@@ -479,7 +524,7 @@ class HudState:
             self.cargo_source = "file"
             self._cargo_file_t = mtime / 1e9
             self._touch()
-        return True
+            return True
 
     def _set_items_from_inventory(self, inventory):
         items = []
@@ -597,11 +642,35 @@ class HudState:
     # ------------------------------------------------------------------
     # journal replay (startup catch-up)
     # ------------------------------------------------------------------
-    @staticmethod
-    def journal_files(journal_dir):
+    _JOURNAL_NAME = re.compile(
+        r"^Journal\.(?:(\d{4})-(\d{2})-(\d{2})T(\d{2})(\d{2})(\d{2})|(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2}))\.(\d+)\.log$")
+
+    @classmethod
+    def _journal_key(cls, path):
+        """
+        Chronological sort key from the file NAME (Journal.2025-12-01T120000.01.log, or the pre-Odyssey
+        Journal.151103231524.01.log), which survives copying / restoring a journal folder; file mtime does not.
+        Names that match neither form fall back to mtime and sort after the ones that parse.
+        """
+        m = cls._JOURNAL_NAME.match(os.path.basename(path))
+        if m:
+            g = m.groups()
+            if g[0]:
+                stamp = "".join(g[0:6])
+            else:
+                yy = int(g[6])
+                stamp = "%04d%s" % (2000 + yy, "".join(g[7:12]))
+            return (0, stamp, int(g[12]), "")
+        try:
+            return (1, "%020.3f" % os.path.getmtime(path), 0, path)
+        except OSError:
+            return (1, "0", 0, path)
+
+    @classmethod
+    def journal_files(cls, journal_dir):
         try:
             files = glob.glob(os.path.join(journal_dir, "Journal*.log"))
-            files.sort(key=lambda p: (os.path.getmtime(p), p))
+            files.sort(key=cls._journal_key)
             return files
         except OSError:
             return []
@@ -609,8 +678,34 @@ class HudState:
     def replay_journal(self, journal_dir, max_backfill_files=60):
         """
         Rebuild state from the newest journal and back-fill mission details from older ones.
-        Safe to run in a worker thread while live events keep arriving.
+        Safe to run in a worker thread while live events keep arriving: live events are parked until the replay
+        has finished and are then applied in order, so replayed (older) lines can never overwrite newer state.
         """
+        with self._lock:
+            self._replaying = True
+            self._kill_run_ts, self._kill_run_n = "", 0          # the replay is a fresh pass over the stream
+            self._replayed_kills.clear()
+        try:
+            return self._replay(journal_dir, max_backfill_files)
+        finally:
+            with self._lock:
+                pending, self._pending = self._pending, []
+                self._replaying = False
+                for entry, esys, estn in pending:
+                    if entry.get("event") in KILL_EVENTS:
+                        # A parked live kill is either a line the replay already read (EDMC and the replay raced on
+                        # the last line: skip it) or genuinely new. The run counter is deliberately NOT reset, so a
+                        # new kill in the same second as the last replayed one gets the next occurrence index.
+                        key = json.dumps(entry, sort_keys=True)
+                        if self._replayed_kills[key] > 0:
+                            self._replayed_kills[key] -= 1
+                            continue
+                    self.handle_event(entry, edmc_system=esys, edmc_station=estn)
+                self._replayed_kills.clear()
+            self.poll_cargo_file(force=True)
+            self.flush(force=True)
+
+    def _replay(self, journal_dir, max_backfill_files):
         files = self.journal_files(journal_dir)
         if not files:
             return False
@@ -627,6 +722,8 @@ class HudState:
                     self.handle_event(entry, replay=True)
                     if entry.get("event") in MISSION_EVENTS:
                         mission_lines.append(entry)
+                    elif entry.get("event") in KILL_EVENTS:
+                        self._replayed_kills[json.dumps(entry, sort_keys=True)] += 1
         except OSError:
             log.exception("could not read %s", latest)
             return False
@@ -637,9 +734,12 @@ class HudState:
             self._backfill(files[:-1][::-1][:max_backfill_files], wanted)
             for entry in mission_lines:           # re-apply newest file so ordering is correct
                 self.handle_event(entry, replay=True)
-        self.poll_cargo_file(force=True)
-        self.flush(force=True)
         return True
+
+    def stats(self):
+        """(mission count, cargo stack count) read under the lock - for logging from other threads."""
+        with self._lock:
+            return len(self.missions), len(self.cargo_items)
 
     def _backfill(self, older_files_newest_first, wanted):
         """Find MissionAccepted/Redirected/CargoDepot for ids we only know as stubs."""

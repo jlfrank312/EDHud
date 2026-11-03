@@ -2,17 +2,29 @@
 
 Draws a small, always-on-top, click-through overlay over Elite Dangerous showing:
 
-* **Cargo** – what's in the hold, free capacity, mission cargo tagged.
-* **Missions** – every active mission **grouped by where you need to go**:
-  * `DELIVER` – drop-off station, with a progress bar (`8/20`) and how much of the
-    remaining amount you're already carrying (`hold 12`, green when you have enough).
-  * `TURN IN` – missions that finish where you accepted them or at a station the game redirects you to
-    (e.g. kill/massacre missions once the kills are done, credit donations). Cargo missions complete
-    at the destination as soon as the delivery is made.
-  * `COLLECT` – everything is delivered (by you or a wing-mate) but the game hasn't paid out yet: go to the
-    destination station to collect the reward. Wing-mate deliveries update the progress bar as they happen.
-  * `● HERE` marks the group you can complete at your current station.
-  * Expiry countdown (turns yellow under 2 h, red when expired).
+* **Cargo** – what's in the hold as a capacity bar (one colour per commodity, mission cargo outlined in green) or an
+  itemised list, with `x/y tons full`.
+* **Missions** – one compact line per active mission, in the order you accepted them. Deliveries to the same
+  destination are grouped together:
+
+  ```
+  same system:   [Sol - Daedalus] - Deliver Gold, 20 tons / [12 tons in cargo, 12 tons remaining]
+  other system:  [Sol - Daedalus] - Deliver Gold, 20 tons to Shinrarta Dezhra - Jameson Memorial / [...]
+  massacre:      [Sol - Daedalus] - Massacre 24 Pirate Lords in Hip 1234 [9/24 fulfilled]
+  ```
+
+  * `[system - station]` is where the mission was accepted (and, for combat missions, where it is handed in);
+    the destination of an away-from-home mission is drawn in red.
+  * Cargo missions show how much of the *remaining* amount you are carrying – green when you have enough,
+    yellow when you don't. When several missions need the same market-bought commodity, the cargo in the hold
+    is shared out between them (in expiry order), so two 20 t Gold missions with 20 t aboard show one ready and
+    one not.
+  * `[all delivered - collect reward]` – everything is delivered (by you or a wing-mate) but the game has not
+    paid out yet: go to the destination station. Wing-mate deliveries update the counts as they happen.
+  * Massacre kills are counted from `Bounty` / `FactionKillBond` events (see *Known limitations*); `TURN IN` in
+    the right-hand column means the game has redirected the mission because the kills are done.
+  * Right-hand columns: payout (`$1.45mill`) and time left (yellow under 2 h, `EXPIRED` in red).
+  * `▲` marks a wing mission.
 
 No separate overlay program (EDMCOverlay etc.) is needed – the overlay is drawn by the plugin itself.
 
@@ -65,7 +77,12 @@ window, position, on/off setting and drag support. Examples: fuel/jump range, ro
 
 ## Known limitations
 
-* Kill progress for massacre-type missions is not tracked (the journal does not report it reliably) – they show the target and expiry only.
+* Massacre kill progress is **inferred**, not reported by the game (the journal has no progress counter): the HUD counts
+  `Bounty` / `FactionKillBond` events against the target faction, in the target system, after you accepted the mission.
+  Missions from the same issuing faction do not stack in the game, so only the earliest-accepted unfinished one is
+  credited; missions from different factions each count the kill. Kills made while EDMC was not running, in a journal
+  file older than the current one, or by wing-mates are not seen. Treat the count as a guide; the mission board in
+  game is authoritative.
 * Overlay window styling for click-through/no-focus-steal uses Windows APIs; on Linux/Mac the panels display but are not click-through.
 * Everything was tested inside a real EDMC run on Linux (virtual display, simulated journals). The Windows-only part (click-through / no focus steal) was verified with a stubbed Windows API, not on a real Windows + Elite install - if panels steal focus or block mouse clicks on your machine, report it.
 

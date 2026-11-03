@@ -121,7 +121,9 @@ def _cargo_tail(snap, m):
     remaining = max(0, total - m["delivered_n"])
     if remaining == 0:
         return [(" / ", "text"), ("[all delivered - collect reward]", "good")]
-    in_cargo = snap["cargo_by_key"].get(m["commodity"], 0)
+    # m["hold"] is this mission's share of the hold (snapshot() splits shared market cargo between stacked
+    # missions for the same commodity); fall back to the raw total only when no share was computed.
+    in_cargo = m["hold"] if m.get("hold") is not None else snap["cargo_by_key"].get(m["commodity"], 0)
     parts = [f"{in_cargo} tons in cargo"]
     if m["delivered_n"]:
         parts.append(f"{remaining} tons remaining")
